@@ -96,6 +96,12 @@ extern "C" fn exception_handler(frame: &mut TrapFrame, index: u64) {
             let imm = frame.esr & 0xFFFF;
             frame.x[0] = frame.x[0].wrapping_add(imm);
         }
+        // A probing read of a register that isn't there (see
+        // `mmio::probe_read`): carry on after it, leaving it to report the
+        // failure.
+        (SYNCHRONOUS, 0x25) if let Some(resume) = crate::mmio::probe_fixup(frame.elr) => {
+            frame.elr = resume;
+        }
         (SYNCHRONOUS, EC_BRK64) => {
             // Step over the breakpoint. (Only one core takes exceptions for
             // now, so a plain load and store is enough.)

@@ -331,9 +331,10 @@ Next, roughly in order:
 11. An SD card driver and a FAT file system server, so programs can come
     from the card (and the boot image shrinks; see [Decisions](#decisions))
 12. The other cores
-13. USB (behind PCIe on both boards) for a keyboard: done for the Pi 5
-    (RP1's xHCIs, root ports only, polled); the Pi 4's VL805 needs the
-    BCM2711's PCIe controller brought up first
+13. ~~USB (behind PCIe on both boards) for a keyboard~~: a user-space
+    xHCI driver for boot keyboards on root ports, polled. Tested in QEMU on
+    the Pi 5's RP1; the Pi 4's PCIe and VL805 bring-up is untested. Hubs,
+    interrupts (MSIs) and other device classes are for later
 
 ## Decisions
 

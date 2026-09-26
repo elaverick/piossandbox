@@ -79,6 +79,7 @@ check_line() {
 check "Hello, world!" "kernel prints greeting"
 check "on Raspberry Pi" "kernel prints banner"
 check "running at EL1" "kernel drops to EL1"
+check "  USB             : " "the kernel looks for USB controllers (and survives a missing one)"
 check "address spaces, user mode, threads and IPC OK" "exception, interrupt, memory, user mode, thread and IPC self-test passes"
 check "init: starting the system from a boot image" "the kernel starts init from the boot image"
 check "init: the console server has" "init hands the hardware to the console server"

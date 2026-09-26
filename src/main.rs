@@ -47,6 +47,7 @@ mod mmio;
 mod mmu;
 #[allow(dead_code)] // shared with the host tests, which use more of it
 mod paging;
+mod pcie;
 mod process;
 #[allow(dead_code)] // shared with the host tests, which use more of it
 mod ranges;
@@ -122,6 +123,9 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     // rest.
     thread::init("kernel");
 
+    // USB: on the Pi 4 this brings up PCIe, which takes a moment.
+    let usb = model.usb(mailbox);
+
     let self_test = self_test();
 
     println!();
@@ -187,6 +191,16 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
         Some((start, size)) => println!("  heap            : {} MiB at {:#x}", size >> 20, start),
         None => println!("  heap            : none (not enough free memory)"),
     }
+    match &usb.report {
+        Ok(board::UsbFound::Rp1) => {
+            println!("  USB             : RP1's two xHCI controllers, behind PCIe")
+        }
+        Ok(board::UsbFound::Vl805 { firmware }) => println!(
+            "  USB             : VL805 xHCI behind PCIe, firmware {:#010x}",
+            firmware
+        ),
+        Err(why) => println!("  USB             : none ({})", why),
+    }
     let boot_image = bootimage::image();
     print!(
         "  boot image      : {} KiB, {} programs:",
@@ -246,7 +260,7 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     // console UARTs' input and the display are its from now on; the kernel
     // only writes its own messages to the UARTs.
     println!();
-    match process::spawn_init(model.usb_controllers()).map(thread::JoinHandle::join) {
+    match process::spawn_init(usb.controllers).map(thread::JoinHandle::join) {
         Ok(process::Exit::Code(code)) => println!("[init exited with code {}]", code),
         Ok(process::Exit::Fault(fault)) => println!("[init was stopped: {}]", fault),
         Err(e) => println!("[init could not be started: {}]", e),

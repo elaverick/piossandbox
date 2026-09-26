@@ -71,12 +71,57 @@ pub struct UsbController {
     pub dma_limit: PhysAddr,
 }
 
+/// The USB host controllers found, and what to say about them.
+pub struct Usb {
+    pub controllers: [Option<UsbController>; 2],
+    pub report: Result<UsbFound, &'static str>,
+}
+
+pub enum UsbFound {
+    /// The Pi 5's, in RP1.
+    Rp1,
+    /// The Pi 4's VL805, behind PCIe, running this firmware version.
+    Vl805 { firmware: u32 },
+}
+
 impl Model {
-    /// The USB host controllers that are there and usable.
-    pub fn usb_controllers(self) -> [Option<UsbController>; 2] {
+    /// Find the USB host controllers, bringing up what they need (on the
+    /// Pi 4, the PCIe link to the VL805, with the firmware's help).
+    pub fn usb(self, mailbox: Mailbox) -> Usb {
         match self {
-            Model::Pi4 => [None, None],
-            Model::Pi5 => pi5::usb_controllers(),
+            Model::Pi4 => match crate::pcie::start(mailbox) {
+                Ok(vl805) => Usb {
+                    controllers: [
+                        Some(UsbController {
+                            kind: pios_abi::USB_XHCI,
+                            base: vl805.base,
+                            size: vl805.size,
+                            dma_offset: 0,
+                            dma_limit: crate::pcie::DMA_LIMIT,
+                        }),
+                        None,
+                    ],
+                    report: Ok(UsbFound::Vl805 {
+                        firmware: vl805.firmware,
+                    }),
+                },
+                Err(e) => Usb {
+                    controllers: [None, None],
+                    report: Err(e),
+                },
+            },
+            Model::Pi5 => {
+                let controllers = pi5::usb_controllers();
+                let report = if controllers[0].is_some() {
+                    Ok(UsbFound::Rp1)
+                } else {
+                    Err("the PCIe link to RP1 is down")
+                };
+                Usb {
+                    controllers,
+                    report,
+                }
+            }
         }
     }
 }
@@ -111,8 +156,12 @@ mod pi4 {
     /// 0x2000_0000.)
     const MMIO_BASE: PhysAddr = PhysAddr::new(0xFE00_0000);
     /// For the kernel map: everything from the main peripherals up to the
-    /// GIC.
-    pub const DEVICES: &[(PhysAddr, usize)] = &[(PhysAddr::new(0xFC00_0000), 0x0400_0000)];
+    /// GIC, and the PCIe controller's outbound window (where the VL805's
+    /// registers go).
+    pub const DEVICES: &[(PhysAddr, usize)] = &[
+        (PhysAddr::new(0xFC00_0000), 0x0400_0000),
+        (PhysAddr::new(0x6_0000_0000), 0x4000_0000),
+    ];
     const GPIO_BASE: PhysAddr = PhysAddr::new(MMIO_BASE.as_usize() + 0x20_0000);
     const UART0_BASE: PhysAddr = PhysAddr::new(MMIO_BASE.as_usize() + 0x20_1000);
     pub const MBOX_BASE: PhysAddr = PhysAddr::new(MMIO_BASE.as_usize() + 0xB880);

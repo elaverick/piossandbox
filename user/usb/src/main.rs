@@ -116,7 +116,7 @@ fn main() -> i32 {
     };
     console::connect(messages);
 
-    if size < 0x1_0000 || registers.map(REGISTERS_ADDR).is_err() {
+    if size < 0x1000 || registers.map(REGISTERS_ADDR).is_err() {
         println!("usb{}: couldn't map the controller", number);
         return 1;
     }
