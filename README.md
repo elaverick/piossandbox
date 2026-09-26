@@ -30,11 +30,15 @@ the machine, and echoes back anything typed on the serial console.
 | `src/exception.rs` | Trap frames, `svc`/`brk` handling, register dumps for fatal exceptions |
 | `src/gic.rs`, `src/irq.rs` | GIC-400 interrupt controller and interrupt dispatch |
 | `src/mmu.rs`, `src/cache.rs` | The memory map (built in `boot.s`), remapping, cache maintenance |
+| `src/heap.rs`, `src/allocator.rs` | The kernel heap behind `Box`/`Vec`/`String`, and its free-list allocator |
+| `src/sync.rs` | `SpinLock` (masks IRQs while held) |
+| `src/fdt.rs` | Device tree reader (header and reserved memory, so far) |
 | `src/cpu.rs`, `src/mmio.rs` | CPU identification, volatile register access |
 | `linker.ld` | Places the kernel at 0x80000 with `_start` first, then `.bss` and a 64 KiB stack |
 | `boot/config.txt` | Firmware configuration for the SD card |
 | `tools/qemu-raspi5/` | A minimal Pi 5 machine for QEMU, for testing |
 | `scripts/` | QEMU tests (serial and screen), SD card assembly |
+| `tools/heap-test/` | Host unit tests for the allocator |
 
 ## Building
 
@@ -61,8 +65,12 @@ make run QEMU_DISPLAY=gtk   # ...and the HDMI output in a window
 make test       # boot, type into UART0, and check the serial and HDMI output
 ```
 
+`make test-host` runs the allocator's unit tests on your machine (no QEMU
+needed), including a 200,000-step randomized test that checks every block for
+overlaps, alignment and corrupted contents.
+
 The serial test (`scripts/qemu-test.sh`) checks the banner (including that
-the kernel runs at EL1 and its exception, interrupt and MMU self-test
+the kernel runs at EL1 and its exception, interrupt, MMU and heap self-test
 passed), types a line, and pastes a 12 KB burst that must be echoed back
 intact.
 
@@ -222,6 +230,25 @@ read-modify-write instructions work, and the boot self-test checks both.
 (The compiler still never emits unaligned accesses: strict alignment is part
 of this Rust target's defaults, which is also what made the code safe to run
 before the MMU was on.)
+
+## Heap
+
+The kernel can use `alloc` (`Box`, `Vec`, `String`, `BTreeMap`, `format!`).
+The heap is the largest stretch of free RAM after the kernel, below the end
+of the ARM's share of RAM (as the firmware reports it) and clear of the
+device tree and anything the device tree reserves (`/memreserve/`).
+
+The allocator (`src/allocator.rs`) is a first-fit free list: free blocks
+are kept in address order, each storing its size and the next block's
+address in its own first 16 bytes; allocation takes the first block that
+fits, and freeing merges the block with free neighbours. All sizes and
+addresses are multiples of 16 bytes. A `SpinLock` guards it, masking IRQs
+while held so an interrupt handler could allocate safely.
+
+Running out of memory panics with the size that failed. The boot self-test
+exercises the standard collections, a page-aligned allocation and a
+pattern-checked random stress run, and checks that all the memory comes back
+afterwards.
 
 ## Pi 4 vs Pi 5
 

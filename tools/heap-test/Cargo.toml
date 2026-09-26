@@ -1,0 +1,11 @@
+[package]
+name = "heap-test"
+version = "0.1.0"
+edition = "2024"
+description = "Host unit tests for the pios heap allocator (src/allocator.rs)"
+publish = false
+
+[lib]
+path = "lib.rs"
+
+[dependencies]

@@ -49,16 +49,27 @@ pub fn disable() {
     unsafe { core::arch::asm!("msr daifset, #2", options(nomem, nostack)) };
 }
 
-/// Run `f` with IRQs masked on this core, restoring the previous state.
-pub fn without_interrupts<R>(f: impl FnOnce() -> R) -> R {
+/// Mask IRQs on this core, returning the previous state for `restore`.
+pub fn save_and_disable() -> u64 {
     let daif: u64;
     // SAFETY: reading DAIF and masking IRQs are always safe.
     unsafe {
         core::arch::asm!("mrs {}, daif", "msr daifset, #2", out(reg) daif, options(nomem, nostack))
     };
-    let result = f();
-    // SAFETY: restores the mask bits read above.
+    daif
+}
+
+/// Put back the interrupt mask saved by `save_and_disable`.
+pub fn restore(daif: u64) {
+    // SAFETY: restores mask bits previously read from DAIF.
     unsafe { core::arch::asm!("msr daif, {}", in(reg) daif, options(nomem, nostack)) };
+}
+
+/// Run `f` with IRQs masked on this core, restoring the previous state.
+pub fn without_interrupts<R>(f: impl FnOnce() -> R) -> R {
+    let daif = save_and_disable();
+    let result = f();
+    restore(daif);
     result
 }
 

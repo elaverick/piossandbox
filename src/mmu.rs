@@ -22,6 +22,9 @@ use crate::cache;
 const BLOCK_SIZE: usize = 2 << 20;
 const L2_COVERS: usize = 512 * BLOCK_SIZE;
 
+/// RAM is mapped from 0 up to here.
+pub const MAPPED_RAM_END: usize = L2_COVERS;
+
 // Block descriptors (see boot.s).
 const DESCRIPTOR_TYPE_MASK: u64 = 0b11;
 const ATTR_INDEX_MASK: u64 = 0b111 << 2;

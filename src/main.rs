@@ -9,19 +9,25 @@
 // Register maps read better with explicit `BASE + 0x00` offsets.
 #![allow(clippy::identity_op)]
 
+extern crate alloc;
+
+mod allocator;
 mod board;
 mod cache;
 mod console;
 mod cpu;
 mod exception;
+mod fdt;
 mod font;
 mod framebuffer;
 mod gic;
 mod gpio;
+mod heap;
 mod irq;
 mod mailbox;
 mod mmio;
 mod mmu;
+mod sync;
 mod timer;
 mod uart;
 
@@ -58,6 +64,17 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     console::enable_interrupts();
     irq::enable();
 
+    // The heap: RAM after the kernel, up to the end of the ARM's share.
+    let device_tree = fdt::Fdt::at(dtb);
+    let mut memory = [0u32; 2];
+    let arm_memory = mailbox
+        .property(mailbox::TAG_GET_ARM_MEMORY, &mut memory)
+        .map(|()| {
+            let (base, size) = (memory[0] as usize, memory[1] as usize);
+            (base, base + size)
+        });
+    let heap_region = heap::init(arm_memory.map(|(_, end)| end), device_tree.as_ref());
+
     let self_test = self_test();
 
     println!();
@@ -72,15 +89,10 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
         revision,
         cpu::current_el()
     );
-    println!(
-        "  device tree     : {:#010x} ({})",
-        dtb,
-        if is_device_tree(dtb) {
-            "valid"
-        } else {
-            "not found"
-        }
-    );
+    match &device_tree {
+        Some(fdt) => println!("  device tree     : {:#010x} ({} bytes)", dtb, fdt.size()),
+        None => println!("  device tree     : {:#010x} (not valid)", dtb),
+    }
     println!(
         "  kernel image    : {:#010x} - {:#010x}",
         &raw const __kernel_start as usize, &raw const __kernel_end as usize
@@ -112,8 +124,19 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
         irq_lines,
         timer::TICK_HZ
     );
+    match heap_region {
+        Some((start, end)) => println!(
+            "  heap            : {:#010x} - {:#010x} ({} MiB)",
+            start,
+            end,
+            (end - start) >> 20
+        ),
+        None => println!("  heap            : none (no free memory found)"),
+    }
     match self_test {
-        Ok(()) => println!("  self-test       : svc, brk, timer interrupts, MMU and atomics OK"),
+        Ok(()) => {
+            println!("  self-test       : svc, brk, timer interrupts, MMU, atomics and heap OK")
+        }
         Err(e) => println!("  self-test       : FAILED: {}", e),
     }
 
@@ -138,16 +161,12 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
         Some(()) => println!("  board revision  : {:#08x}", revision[0]),
         None => println!("  board revision  : (no answer from the firmware)"),
     }
-    let mut memory = [0u32; 2];
-    if mailbox
-        .property(mailbox::TAG_GET_ARM_MEMORY, &mut memory)
-        .is_some()
-    {
+    if let Some((start, end)) = arm_memory {
         println!(
             "  ARM memory      : {:#010x} - {:#010x} ({} MiB)",
-            memory[0],
-            memory[0] as u64 + memory[1] as u64,
-            memory[1] >> 20
+            start,
+            end,
+            (end - start) >> 20
         );
     }
 
@@ -218,17 +237,9 @@ fn self_test() -> Result<(), &'static str> {
     if old != 1 || counter.into_inner() != 2 {
         return Err("atomic read-modify-write failed");
     }
-    Ok(())
-}
 
-/// Does `addr` point at a flattened device tree (big-endian magic 0xd00dfeed)?
-fn is_device_tree(addr: usize) -> bool {
-    const FDT_MAGIC: u32 = 0xD00D_FEED;
-    // SAFETY: the firmware passes either 0 or the address of the DTB it
-    // loaded into RAM; we only read one aligned word from it.
-    addr != 0
-        && addr.is_multiple_of(4)
-        && u32::from_be(unsafe { (addr as *const u32).read_volatile() }) == FDT_MAGIC
+    heap::self_test()?;
+    Ok(())
 }
 
 /// Stop this core for good.

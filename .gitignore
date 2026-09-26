@@ -1,4 +1,4 @@
-/target
+target/
 /kernel8.img
 /build
 /rp1-uart0.log

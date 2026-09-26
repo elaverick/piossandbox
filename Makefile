@@ -7,6 +7,7 @@
 #   make run-pi5    boot it in the raspi5-pios model (see tools/qemu-raspi5)
 #   make test-pi5   test it on the raspi5-pios model: both UARTs and HDMI
 #   make sdcard     assemble a bootable SD card directory in build/sdcard
+#   make test-host  run the host unit tests (the heap allocator)
 #   make disasm     disassemble the kernel
 
 TARGET  := aarch64-unknown-none-softfloat
@@ -29,7 +30,7 @@ QEMU_PI5 ?= $(QEMU)
 DTB ?=
 QEMU_ARGS := -kernel $(IMG) $(if $(DTB),-dtb $(DTB),)
 
-.PHONY: all build run run-pi5 test test-pi5 sdcard disasm clippy clean
+.PHONY: all build run run-pi5 test test-pi5 test-host sdcard disasm clippy clean
 
 all: $(IMG)
 
@@ -58,6 +59,10 @@ test-pi5: $(IMG)
 	QEMU="$(QEMU_PI5)" MACHINE=raspi5-pios CONSOLE=0 DTB="$(DTB)" ./scripts/qemu-test.sh $(IMG)
 	QEMU="$(QEMU_PI5)" MACHINE=raspi5-pios CONSOLE=1 DTB="$(DTB)" ./scripts/qemu-test.sh $(IMG)
 	QEMU="$(QEMU_PI5)" MACHINE=raspi5-pios ./scripts/qemu-screen-test.sh $(IMG)
+
+HOST := $(shell rustc -vV | sed -n 's/^host: //p')
+test-host:
+	cargo test --manifest-path tools/heap-test/Cargo.toml --target $(HOST)
 
 sdcard: $(IMG)
 	./scripts/make-sdcard.sh $(IMG) build/sdcard
