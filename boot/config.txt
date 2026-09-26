@@ -1,14 +1,24 @@
-# Raspberry Pi 4 firmware configuration for pios.
+# Raspberry Pi 4 and 5 firmware configuration for pios.
 # See https://www.raspberrypi.com/documentation/computers/config_txt.html
 
-# Start the ARM cores in 64-bit mode and load our kernel at 0x80000.
+# Start the ARM cores in 64-bit mode and load our kernel at 0x80000. (The
+# Pi 5 would otherwise look for kernel_2712.img first.)
 arm_64bit=1
 kernel=kernel8.img
 
-# Keep the UART clocks stable. pios reconfigures GPIO 14/15 for UART0 (PL011)
-# itself, so no device tree overlay is needed.
+# Keep the UART clocks stable. On the Pi 4, pios reconfigures GPIO 14/15 for
+# UART0 (PL011) itself, so no device tree overlay is needed.
 enable_uart=1
 
-# Uncomment to see the firmware's own boot log on GPIO 14/15 (via the mini
-# UART) before pios takes over. Useful if nothing appears on the serial port.
+[pi5]
+# On the Pi 5, GPIO 14/15 belong to the RP1 I/O chip, which sits behind a
+# PCIe link. Have the firmware set up RP1's UART0 at 115200 baud and leave
+# the link up, so pios can use it alongside the debug UART connector.
+enable_rp1_uart=1
+pciex4_reset=0
+
+[all]
+# Uncomment to see the firmware's own boot log before pios takes over: on
+# GPIO 14/15 on a Pi 4, on the debug UART connector on a Pi 5. Useful if
+# nothing appears on the serial port.
 #uart_2ndstage=1

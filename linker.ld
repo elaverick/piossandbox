@@ -1,7 +1,7 @@
 /*
- * Linker script for the Raspberry Pi 4 in AArch64 mode.
+ * Linker script for the Raspberry Pi 4 and 5 in AArch64 mode.
  *
- * The GPU firmware loads kernel8.img to 0x80000 and jumps to its first byte,
+ * The firmware loads kernel8.img to 0x80000 and jumps to its first byte,
  * so .text.boot (containing _start) must come first.
  */
 ENTRY(_start)
@@ -24,6 +24,10 @@ SECTIONS
         *(.data .data.*)
     }
 
+    /* End of what is stored in kernel8.img (used by _start to relocate). */
+    . = ALIGN(16);
+    __image_end = .;
+
     /* Not stored in the image; zeroed by _start before Rust code runs. */
     .bss (NOLOAD) : ALIGN(16) {
         __bss_start = .;
@@ -31,6 +35,12 @@ SECTIONS
         *(COMMON)
         . = ALIGN(16);
         __bss_end = .;
+    }
+
+    /* The boot stack. */
+    .stack (NOLOAD) : ALIGN(16) {
+        . += 64K;
+        __stack_top = .;
     }
 
     __kernel_end = .;

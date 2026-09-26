@@ -1,25 +1,10 @@
-//! Memory-mapped I/O helpers and the BCM2711 peripheral address map.
-
-/// Base of the peripheral window as seen by the ARM cores on the BCM2711
-/// (Raspberry Pi 4) in the default "low peripheral" mode.
-///
-/// The Pi 2/3 use 0x3F00_0000 and the Pi 1/Zero 0x2000_0000.
-pub const MMIO_BASE: usize = 0xFE00_0000;
-
-/// GPIO controller.
-pub const GPIO_BASE: usize = MMIO_BASE + 0x20_0000;
-
-/// UART0 (ARM PL011).
-pub const UART0_BASE: usize = MMIO_BASE + 0x20_1000;
-
-/// VideoCore mailbox.
-pub const MBOX_BASE: usize = MMIO_BASE + 0xB880;
+//! Memory-mapped I/O helpers.
 
 /// Write a 32-bit device register.
 #[inline(always)]
 pub fn write(addr: usize, value: u32) {
-    // SAFETY: callers only pass addresses of BCM2711 device registers, which
-    // are always mapped (the MMU is off) and 4-byte aligned.
+    // SAFETY: callers only pass addresses of device registers that exist on
+    // the board we detected. The MMU is off, so they are always mapped.
     unsafe { core::ptr::write_volatile(addr as *mut u32, value) }
 }
 

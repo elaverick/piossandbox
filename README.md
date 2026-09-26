@@ -1,21 +1,21 @@
 # pios
 
-A small command-line operating system for the **Raspberry Pi 4**, written in
-Rust with a little AArch64 assembly.
+A small command-line operating system for the **Raspberry Pi 4 and 5**,
+written in Rust with a little AArch64 assembly. One `kernel8.img` runs on
+both: the board is detected at boot from the CPU type.
 
 It currently implements the [OSDev "Raspberry Pi Bare Bones"][bare-bones]
-tutorial, ported from C to Rust: it brings up UART0, prints a greeting plus a
-few facts about the machine, and echoes back anything typed on the serial
-console.
+tutorial, ported from C to Rust: it brings up a serial console, prints a
+greeting plus a few facts about the machine, and echoes back anything typed.
 
 ```
 Hello, world!
 
-pios 0.1.0 for Raspberry Pi 4
-  exception level : EL2
+pios 0.1.0 on Raspberry Pi 4
+  CPU             : Cortex-A72 r0p3, running at EL2
   device tree     : 0x08000000 (valid)
-  kernel image    : 0x00080000 - 0x00081470
-  UART0 clock     : 3000000 Hz, 115200 baud
+  kernel image    : 0x00080000 - 0x00092e50
+  console         : UART0 on GPIO 14/15, 115200 baud (3000000 Hz clock)
   board revision  : 0xb03115
   ARM memory      : 0x00000000 - 0x3c000000 (960 MiB)
 
@@ -28,14 +28,19 @@ Type something and it will be echoed back.
 
 | File | Purpose |
 | --- | --- |
-| `src/boot.s` | `_start`: parks cores 1-3, sets up the stack, zeroes `.bss`, calls `kernel_main` |
+| `src/boot.s` | `_start`: parks secondary cores, relocates if needed, sets up the stack and exception vectors, zeroes `.bss`, calls `kernel_main` |
 | `src/main.rs` | `kernel_main`, the panic handler |
-| `src/uart.rs` | PL011 UART0 driver and `print!`/`println!` |
-| `src/gpio.rs` | Pin function and pull-up/down configuration (BCM2711) |
+| `src/board.rs` | Pi 4 / Pi 5 detection, addresses and console bring-up |
+| `src/console.rs` | The console (mirrors to every console UART) and `print!`/`println!` |
+| `src/uart.rs` | PL011 UART driver |
+| `src/gpio.rs` | BCM2711 pin function and pull-up/down configuration |
 | `src/mailbox.rs` | VideoCore mailbox property interface |
-| `src/mmio.rs` | Peripheral addresses and volatile register access |
-| `linker.ld` | Places the kernel at 0x80000 with `_start` first |
+| `src/timer.rs` | ARM generic timer (used for timeouts) |
+| `src/exception.rs` | Reports unexpected exceptions (ESR/ELR/FAR) instead of hanging |
+| `src/cpu.rs`, `src/mmio.rs` | CPU identification, volatile register access |
+| `linker.ld` | Places the kernel at 0x80000 with `_start` first, then `.bss` and a 64 KiB stack |
 | `boot/config.txt` | Firmware configuration for the SD card |
+| `tools/qemu-raspi5/` | A minimal Pi 5 machine for QEMU, for testing |
 
 ## Building
 
@@ -52,7 +57,9 @@ target feature. We use it deliberately: until the MMU is enabled all memory is
 treated as Device memory, where unaligned accesses fault, so the compiler must
 not generate them.
 
-## Running in QEMU
+## Testing in QEMU
+
+### Raspberry Pi 4
 
 The `raspi4b` machine needs **QEMU 9.0 or newer** (Ubuntu 24.04 ships 8.2,
 which only emulates up to the Pi 3; build QEMU from source or use a newer
@@ -68,20 +75,71 @@ To boot with the real Pi 4 device tree (so `x0` points at a DTB, as it does on
 hardware), run `make sdcard` first and then
 `make run DTB=build/sdcard/bcm2711-rpi-4-b.dtb`.
 
-## Running on a real Raspberry Pi 4
+### Raspberry Pi 5
+
+QEMU has no Pi 5 machine, so `tools/qemu-raspi5/` adds a minimal one,
+`raspi5-pios`: four Cortex-A76 cores numbered like the real BCM2712, the
+debug UART, RP1's UART0, and a small fake firmware that leaves things the way
+the real firmware does. It checks addresses, board detection and the boot
+flow; it is not an emulation of the BCM2712. Build QEMU with it from a QEMU
+9.2 source tree:
+
+```sh
+tools/qemu-raspi5/build-qemu.sh ~/src/qemu-9.2.1 ~/qemu-pios
+make test-pi5 QEMU_PI5=~/qemu-pios/bin/qemu-system-aarch64
+make run-pi5  QEMU_PI5=~/qemu-pios/bin/qemu-system-aarch64
+```
+
+`test-pi5` runs the test on both UARTs. `run-pi5` puts the debug UART on your
+terminal and writes RP1 UART0's output to `rp1-uart0.log`. The model has no
+VideoCore, so the board revision line reports that the firmware did not
+answer.
+
+## Running on real hardware
 
 1. `make sdcard` builds the kernel and assembles `build/sdcard/` with
-   `kernel8.img`, `config.txt` and the GPU firmware (`start4.elf`,
-   `fixup4.dat`) and device tree downloaded from
-   [raspberrypi/firmware](https://github.com/raspberrypi/firmware).
+   `kernel8.img`, `config.txt`, the Pi 4 GPU firmware (`start4.elf`,
+   `fixup4.dat`) and the device trees for the Pi 4, 400, 5 and 500,
+   downloaded from [raspberrypi/firmware](https://github.com/raspberrypi/firmware).
+   The same card boots either board.
 2. Format a micro SD card with a single FAT32 partition and copy the contents
    of `build/sdcard/` onto it.
-3. Connect a 3.3 V USB-serial adapter to the GPIO header:
-   adapter **RX to pin 8** (GPIO 14, TXD), adapter **TX to pin 10**
-   (GPIO 15, RXD) and **GND to pin 6**. Do not connect the adapter's 5 V/3.3 V
-   power pin.
-4. Open the serial port at **115200 8N1** (e.g. `picocom -b 115200
-   /dev/ttyUSB0` or PuTTY), insert the card and power on the Pi.
+3. Connect a 3.3 V serial adapter (see below) and open it at **115200 8N1**
+   (e.g. `picocom -b 115200 /dev/ttyUSB0` or PuTTY).
+4. Insert the card and power on the Pi.
+
+### Serial connections
+
+**GPIO header (Pi 4 and Pi 5):** adapter **RX to pin 8** (GPIO 14, TXD),
+adapter **TX to pin 10** (GPIO 15, RXD) and **GND to pin 6**. Do not connect
+the adapter's power pin.
+
+**Pi 5 debug UART connector:** the small 3-pin JST-SH socket between the two
+micro HDMI ports, for example with the Raspberry Pi Debug Probe's cable. The
+Pi 500 has no such connector; use the GPIO header.
+
+On a Pi 5, pios uses both at once: the debug connector is programmed by pios
+itself, and GPIO 14/15 (RP1's UART0) is set up by the firmware because
+`config.txt` has `enable_rp1_uart=1` in its `[pi5]` section. Without that
+line pios can't reach RP1 and only uses the debug connector.
+
+If nothing appears, uncomment `uart_2ndstage=1` in `config.txt` to see the
+firmware's own boot log (on GPIO 14/15 on a Pi 4, on the debug connector on a
+Pi 5). If pios hits an unexpected exception it prints `UNHANDLED EXCEPTION`
+with the ESR/ELR/FAR registers.
+
+## Pi 4 vs Pi 5
+
+| | Pi 4 (BCM2711) | Pi 5 (BCM2712) |
+| --- | --- | --- |
+| CPU | Cortex-A72; cores numbered in MPIDR Aff0 | Cortex-A76; cores numbered in MPIDR Aff1 |
+| Peripherals | 0xFE00_0000 | 0x10_7C00_0000 (SoC), 0x1F_0000_0000 (RP1 via PCIe) |
+| Console | UART0 on GPIO 14/15 | debug UART (fixed 9.216 MHz clock) + RP1 UART0 on GPIO 14/15 |
+| Mailbox | 0xFE00_B880 | 0x10_7C01_3880 |
+| Below 0x80000 | firmware's spin tables | reserved for TF-A (secure firmware) |
+
+Because TF-A owns the memory below the kernel on the Pi 5, the stack lives
+after the kernel image rather than below it.
 
 ## Differences from the C tutorial
 
@@ -90,11 +148,15 @@ hardware), run `make sdcard` first and then
   `GPIO_PUP_PDN_CNTRL_REG0` instead, and we also explicitly select ALT0 for
   GPIO 14/15, because the Pi 4 firmware routes those pins to the mini UART by
   default.
+- **Board selection.** The tutorial takes the board as a parameter (and calls
+  `uart_init(2)`, which would not work on a Pi 4). We detect the board from
+  the CPU type.
 - **Baud rate divisor.** Rather than hard-coding the divisor for a 3 MHz clock,
   we compute it from the clock rate the firmware reports back from the
   mailbox call (falling back to the 48 MHz default).
-- **Interrupts.** `IMSC` is set to 0 (all UART interrupts disabled) — in the
-  PL011 a 1 bit *enables* an interrupt source.
+- **Interrupts.** `IMSC` is set to 0 (all UART interrupts disabled). In the
+  PL011 a 1 bit *enables* an interrupt source, so the tutorial's "mask all"
+  write actually enables them.
 - **Device tree.** On AArch64 the firmware passes the DTB address in `x0`
   (there are no ATAGs); `_start` forwards it to `kernel_main`.
 - **Soft-float target.** We build for `aarch64-unknown-none-softfloat` so no
