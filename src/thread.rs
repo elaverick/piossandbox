@@ -383,13 +383,13 @@ pub fn spawn(
 }
 
 /// Start a user thread in `process`, entering user mode at `entry` with its
-/// stack pointer at `stack` and `args` in x0 and x1.
+/// stack pointer at `stack` and `args` in x0-x3.
 pub fn spawn_user(
     name: &'static str,
     process: Arc<Process>,
     entry: usize,
     stack: usize,
-    args: [usize; 2],
+    args: [usize; 4],
 ) -> Result<JoinHandle, OutOfMemory> {
     let kernel_stack = KernelStack::new().ok_or(OutOfMemory)?;
     let frame = (kernel_stack.top() - size_of::<TrapFrame>()) as *mut TrapFrame;

@@ -163,15 +163,18 @@ impl Process {
 /// Load the ELF executable `image` as a new process and start running it,
 /// with `arg` as the first argument to its entry point. If there is a
 /// `handle`, the new process gets it, and its number there as the second
-/// argument. Join the returned handle to wait for it to end.
+/// argument. `args` (at most `ARGS_MAX` bytes) are copied to the top of its
+/// stack, and their address and length are the third and fourth arguments.
+/// Join the returned handle to wait for it to end.
 pub fn spawn(
     name: &'static str,
     image: &[u8],
     arg: usize,
     handle: Option<Handle>,
+    args: &[u8],
 ) -> Result<JoinHandle, LoadError> {
     let (process, entry) = Process::load(image)?;
-    start(name, process, entry, arg, handle)
+    start(name, process, entry, arg, handle, args)
 }
 
 /// Start the program `name` from the boot image, with the whole boot image
@@ -185,7 +188,7 @@ pub fn spawn_from_boot_image(name: &'static str) -> Result<JoinHandle, LoadError
         .space
         .lock()
         .map_static(BOOT_IMAGE_ADDR, image.as_bytes())?;
-    start(name, process, entry, BOOT_IMAGE_ADDR, None)
+    start(name, process, entry, BOOT_IMAGE_ADDR, None, &[])
 }
 
 /// Start `init`: with the boot image mapped as for `spawn_from_boot_image`,
@@ -202,6 +205,7 @@ pub fn spawn_init() -> Result<JoinHandle, LoadError> {
         boot_image_size: image.as_bytes().len() as u64,
         ..BootInfo::default()
     };
+    let boot_image = Memory::Static(image.as_bytes());
     {
         let mut space = process.space.lock();
         space.map_static(BOOT_IMAGE_ADDR, image.as_bytes())?;
@@ -210,6 +214,7 @@ pub fn spawn_init() -> Result<JoinHandle, LoadError> {
             let number = handles.insert(handle);
             number.unwrap_or_else(|_| unreachable!("a new handle table has room")) as u64
         };
+        info.boot_image_memory = give(Handle::Memory(boot_image));
 
         for (slot, (base, irq)) in info
             .uarts
@@ -256,7 +261,7 @@ pub fn spawn_init() -> Result<JoinHandle, LoadError> {
         };
         space.write(BOOT_INFO_ADDR, bytes)?;
     }
-    start("init", process, entry, BOOT_INFO_ADDR, None)
+    start("init", process, entry, BOOT_INFO_ADDR, None, &[])
 }
 
 fn start(
@@ -265,7 +270,16 @@ fn start(
     entry: usize,
     arg: usize,
     handle: Option<Handle>,
+    args: &[u8],
 ) -> Result<JoinHandle, LoadError> {
+    assert!(args.len() <= pios_abi::ARGS_MAX);
+    let (stack, args_addr) = if args.is_empty() {
+        (STACK_TOP, 0)
+    } else {
+        let at = STACK_TOP - args.len().next_multiple_of(16);
+        process.space.lock().write(at, args)?;
+        (at, at)
+    };
     let handle = match handle {
         Some(handle) => {
             let number = process.handles.lock().insert(handle);
@@ -273,7 +287,8 @@ fn start(
         }
         None => 0,
     };
-    thread::spawn_user(name, Arc::new(process), entry, STACK_TOP, [arg, handle])
+    let entry_args = [arg, handle, args_addr, args.len()];
+    thread::spawn_user(name, Arc::new(process), entry, stack, entry_args)
         .map_err(|_| LoadError::NoThread)
 }
 
@@ -312,7 +327,7 @@ pub fn self_test() -> Result<(), &'static str> {
     let ticks_before = tick_count();
     let start = |name, arg| {
         let image = bootimage::program(name).ok_or("a test program is missing")?;
-        spawn(name, image, arg, None).map_err(|_| "a test program failed to load")
+        spawn(name, image, arg, None, &[]).map_err(|_| "a test program failed to load")
     };
     let usertest = start("usertest", 0)?;
     let fptests = [start("fptest", 1)?, start("fptest", 2)?];

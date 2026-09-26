@@ -27,6 +27,7 @@ pub use pios_abi::{Error, ExitStatus, MESSAGE_WORDS, rights};
 
 pub mod console;
 mod ipc;
+pub mod procman;
 use ipc::close_raw;
 pub use ipc::{Handle, Message, Received, Reply, endpoint, timer};
 
@@ -37,6 +38,11 @@ fn syscall(number: usize, a0: usize, a1: usize, a2: usize) -> Result<usize, Erro
 
 /// Make a system call with up to four arguments.
 fn syscall4(number: usize, args: [usize; 4]) -> Result<usize, Error> {
+    syscall6(number, [args[0], args[1], args[2], args[3], 0, 0])
+}
+
+/// Make a system call with up to six arguments.
+fn syscall6(number: usize, args: [usize; 6]) -> Result<usize, Error> {
     let result: usize;
     // SAFETY: `svc` enters the kernel, which only changes x0, and checks
     // any pointers it is given. (It may write through them, which the
@@ -44,6 +50,7 @@ fn syscall4(number: usize, args: [usize; 4]) -> Result<usize, Error> {
     unsafe {
         core::arch::asm!("svc #0", in("x8") number, inout("x0") args[0] => result,
                          in("x1") args[1], in("x2") args[2], in("x3") args[3],
+                         in("x4") args[4], in("x5") args[5],
                          options(nostack));
     }
     Error::from_result(result)
@@ -104,13 +111,31 @@ pub fn start_handle() -> Option<Handle> {
     }
 }
 
+/// The argument string this program was started with (by convention, its
+/// command line's arguments). Empty if there was none, or it isn't UTF-8.
+pub fn args() -> &'static str {
+    let (addr, len) = (ARGS_ADDR.load(Ordering::Relaxed), ARGS_LEN.load(Ordering::Relaxed));
+    if len == 0 {
+        return "";
+    }
+    // SAFETY: the kernel copied the arguments to the top of our stack, above
+    // where `_start` began, which nothing writes to; they stay for as long
+    // as we run.
+    let bytes = unsafe { core::slice::from_raw_parts(addr as *const u8, len) };
+    core::str::from_utf8(bytes).unwrap_or("")
+}
+
 static ARGUMENT: AtomicUsize = AtomicUsize::new(0);
 static START_HANDLE: AtomicUsize = AtomicUsize::new(0);
+static ARGS_ADDR: AtomicUsize = AtomicUsize::new(0);
+static ARGS_LEN: AtomicUsize = AtomicUsize::new(0);
 
 #[doc(hidden)]
-pub fn _set_arguments(arg: usize, handle: usize) {
+pub fn _set_arguments(arg: usize, handle: usize, args_addr: usize, args_len: usize) {
     ARGUMENT.store(arg, Ordering::Relaxed);
     START_HANDLE.store(handle, Ordering::Relaxed);
+    ARGS_ADDR.store(args_addr, Ordering::Relaxed);
+    ARGS_LEN.store(args_len, Ordering::Relaxed);
 }
 
 /// A process this one started. Dropping it gives up the handle (the child
@@ -120,6 +145,16 @@ pub struct Child {
 }
 
 impl Child {
+    /// The child's process handle (e.g. to pass it on).
+    pub fn into_handle(self) -> Handle {
+        self.handle
+    }
+
+    /// A child from a process handle someone passed us.
+    pub fn from_handle(handle: Handle) -> Child {
+        Child { handle }
+    }
+
     /// Wait for the child to end, and say how.
     pub fn wait(self) -> Result<ExitStatus, Error> {
         // `wait` closes the handle itself.
@@ -129,13 +164,21 @@ impl Child {
 }
 
 /// Start a new process running the ELF executable `image`, with `arg` as
-/// its argument and giving it `handle`, if any (which needs the `TRANSFER`
-/// right, and is gone either way).
-pub fn spawn(image: &[u8], arg: usize, handle: Option<Handle>) -> Result<Child, Error> {
+/// its argument, `args` as its argument string (see [`args`]) and giving it
+/// `handle`, if any (which needs the `TRANSFER` right, and is gone either
+/// way).
+pub fn spawn(image: &[u8], arg: usize, handle: Option<Handle>, args: &str) -> Result<Child, Error> {
     let handle = handle.map_or(0, Handle::into_raw);
-    let result = syscall4(
+    let result = syscall6(
         call::SPAWN,
-        [image.as_ptr() as usize, image.len(), arg, handle],
+        [
+            image.as_ptr() as usize,
+            image.len(),
+            arg,
+            handle,
+            args.as_ptr() as usize,
+            args.len(),
+        ],
     );
     if result.is_err() {
         close_raw(handle);
@@ -176,6 +219,12 @@ impl<T> TakeOnce<T> {
     }
 }
 
+/// Make a raw system call with six arguments, for testing the kernel's
+/// argument checking.
+pub fn raw_syscall6(number: usize, args: [usize; 6]) -> Result<usize, Error> {
+    syscall6(number, args)
+}
+
 /// Make a raw system call, for testing the kernel's argument checking.
 pub fn raw_syscall(number: usize, a0: usize, a1: usize, a2: usize) -> Result<usize, Error> {
     syscall(number, a0, a1, a2)
@@ -213,15 +262,15 @@ macro_rules! println {
 }
 
 /// Define the program's entry point: `_start` records its arguments (for
-/// [`argument`] and [`start_handle`]), calls `$main` (a `fn() -> i32`) and exits with what it
+/// [`argument`], [`start_handle`] and [`args`]), calls `$main` (a `fn() -> i32`) and exits with what it
 /// returns.
 #[macro_export]
 macro_rules! pios_main {
     ($main:path) => {
         #[unsafe(no_mangle)]
         #[unsafe(link_section = ".text._start")]
-        pub extern "C" fn _start(arg: usize, handle: usize) -> ! {
-            $crate::_set_arguments(arg, handle);
+        pub extern "C" fn _start(arg: usize, handle: usize, args: usize, args_len: usize) -> ! {
+            $crate::_set_arguments(arg, handle, args, args_len);
             let main: fn() -> i32 = $main;
             $crate::exit(main())
         }

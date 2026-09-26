@@ -16,6 +16,9 @@ fn main() -> i32 {
         libpios::console::connect(console);
     }
     println!("Hello from user space!");
+    if !libpios::args().is_empty() {
+        println!("  arguments: {}", libpios::args());
+    }
     let mut primes = [0u32; 32];
     let mut count = 0;
     for n in 2..PRIMES_BELOW {

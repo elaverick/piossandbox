@@ -19,13 +19,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "echo"
-version = "0.1.0"
-dependencies = [
- "libpios",
-]
-
-[[package]]
 name = "fptest"
 version = "0.1.0"
 dependencies = [
@@ -79,6 +72,21 @@ version = "0.1.0"
 [[package]]
 name = "pios-textconsole"
 version = "0.1.0"
+
+[[package]]
+name = "procman"
+version = "0.1.0"
+dependencies = [
+ "libpios",
+ "pios-bootfs",
+]
+
+[[package]]
+name = "shell"
+version = "0.1.0"
+dependencies = [
+ "libpios",
+]
 
 [[package]]
 name = "usertest"

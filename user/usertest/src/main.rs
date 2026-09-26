@@ -6,7 +6,7 @@
 #![no_std]
 #![no_main]
 
-use libpios::{Error, println, raw_syscall};
+use libpios::{Error, println, raw_syscall, raw_syscall6};
 use pios_abi::call;
 
 libpios::pios_main!(main);
@@ -35,7 +35,7 @@ fn main() -> i32 {
     let n = SPIN as u128;
     let squares = ((n - 1) * n * (2 * n - 1) / 6) as u64; // sum of i^2 for i < n
     let not_elf = [0u8; 64];
-    let checks: [(&str, bool); 15] = [
+    let checks: [(&str, bool); 17] = [
         ("registers survive interrupts during a long computation", sum_of_squares(SPIN) == squares),
         ("an empty write succeeds", raw_syscall(call::DEBUG_WRITE, text.as_ptr() as usize, 0, 0) == Ok(0)),
         ("an unknown call is refused", raw_syscall(999, 0, 0, 0) == Err(Error::NoSuchCall)),
@@ -58,7 +58,7 @@ fn main() -> i32 {
                 == Err(Error::InvalidArgument),
         ),
         ("read-only data is intact", CONSTANT == 0x1234_5678),
-        ("spawning something that isn't a program is refused", libpios::spawn(&not_elf, 0, None).err() == Some(Error::InvalidArgument)),
+        ("spawning something that isn't a program is refused", libpios::spawn(&not_elf, 0, None, "").err() == Some(Error::InvalidArgument)),
         (
             "spawning from a bad pointer is refused",
             raw_syscall(call::SPAWN, 0xFFFF_FF80_0008_0000, 64, 0) == Err(Error::BadAddress),
@@ -71,6 +71,16 @@ fn main() -> i32 {
         ("waiting on a handle we don't have is refused", raw_syscall(call::WAIT, 12345, 0, 0) == Err(Error::BadHandle)),
         ("closing a handle we don't have is refused", raw_syscall(call::CLOSE, 0, 0, 0) == Err(Error::BadHandle)),
         ("yield returns", raw_syscall(call::YIELD, 0, 0, 0) == Ok(0)),
+        (
+            "spawning with arguments at a bad address is refused",
+            raw_syscall6(call::SPAWN, [not_elf.as_ptr() as usize, 64, 0, 0, 0xFFFF_FF80_0008_0000, 8])
+                == Err(Error::BadAddress),
+        ),
+        (
+            "spawning with too long an argument string is refused",
+            raw_syscall6(call::SPAWN, [not_elf.as_ptr() as usize, 64, 0, 0, not_elf.as_ptr() as usize, pios_abi::ARGS_MAX + 1])
+                == Err(Error::InvalidArgument),
+        ),
     ];
     let mut ok = true;
     for (what, passed) in checks {

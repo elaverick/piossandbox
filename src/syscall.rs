@@ -32,7 +32,7 @@ pub fn handle(frame: &mut TrapFrame) {
             crate::thread::yield_now();
             Ok(0)
         }
-        call::SPAWN => spawn(args[0], args[1], args[2], args[3]),
+        call::SPAWN => spawn(args[0], args[1], args[2], args[3], (args[4], args[5])),
         call::WAIT => wait(args[0]),
         call::CLOSE => close(args[0]),
         call::ENDPOINT => endpoint(),
@@ -118,14 +118,23 @@ fn endpoint_with(
     }
 }
 
-/// `spawn(ptr, len, arg, handle)`: start the executable in the caller's
-/// memory as a new process, and give the caller a handle to it. If the
-/// process can't be started, a handle passed to it is closed.
-fn spawn(addr: usize, len: usize, arg: usize, handle: usize) -> Result<usize, Error> {
-    if len > pios_abi::SPAWN_MAX {
+/// `spawn(ptr, len, arg, handle, args_ptr, args_len)`: start the executable
+/// in the caller's memory as a new process, and give the caller a handle to
+/// it. If the process can't be started, a handle passed to it is closed.
+fn spawn(
+    addr: usize,
+    len: usize,
+    arg: usize,
+    handle: usize,
+    (args_addr, args_len): (usize, usize),
+) -> Result<usize, Error> {
+    if len > pios_abi::SPAWN_MAX || args_len > pios_abi::ARGS_MAX {
         return Err(Error::InvalidArgument);
     }
     let source = UserSlice::new(addr, len)?;
+    let mut args = [0u8; pios_abi::ARGS_MAX];
+    let args = &mut args[..args_len];
+    UserSlice::new(args_addr, args_len)?.read(0, args);
     let caller = caller();
     if !caller.handles().lock().has_room(1) {
         return Err(Error::OutOfMemory);
@@ -139,7 +148,7 @@ fn spawn(addr: usize, len: usize, arg: usize, handle: usize) -> Result<usize, Er
     image.resize(len, 0);
     source.read(0, &mut image);
     let handle = take_for_transfer(&caller, handle)?;
-    let child = process::spawn("user", &image, arg, handle).map_err(|e| match e {
+    let child = process::spawn("user", &image, arg, handle, args).map_err(|e| match e {
         LoadError::Map(MapError::OutOfMemory) | LoadError::NoThread => Error::OutOfMemory,
         _ => Error::InvalidArgument,
     })?;

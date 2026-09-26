@@ -85,7 +85,7 @@ fn parent(image_addr: usize) -> bool {
     drop(d);
 
     let to_parent = e.duplicate(SEND | TRANSFER, 42).unwrap();
-    let child = libpios::spawn(me, CHILD, Some(to_parent)).unwrap();
+    let child = libpios::spawn(me, CHILD, Some(to_parent), "").unwrap();
 
     // 1. A call, with the badge; a reply handle works once.
     let r = e.receive().unwrap();

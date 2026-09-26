@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Boot kernel8.img on QEMU's raspi4b machine, type enough lines to make the
-# display console scroll (with backspaces, tabs and a line that wraps), take a screenshot of the
-# emulated HDMI output and check it against the serial console transcript.
+# Boot kernel8.img on QEMU's raspi4b machine, type enough commands into the
+# shell to make the display console scroll (with backspaces, tabs and a line
+# that wraps), take a screenshot of the emulated HDMI output and check it
+# against the serial console transcript.
 set -euo pipefail
 
 IMG=${1:-kernel8.img}
@@ -29,11 +30,11 @@ PY
 {
     sleep 2
     for i in $(seq -w 1 40); do
-        printf 'line %s of the scrolling test\r' "$i"
+        printf 'echo line %s of the scrolling test\r' "$i"
     done
-    printf 'typo\x7f\x7f\x7f\x7fcorrected\r'
-    printf 'tab\tstops\tline up\r'
-    printf 'a long line that is wider than the screen so that it has to wrap %.0s' 1 2 3
+    printf 'echo typo\x7f\x7f\x7f\x7fcorrected\r'
+    printf 'echo tab\tstops\tline up\r'
+    printf 'echo a long line that is wider than the screen so it wraps %.0s' 1 2
     printf '\r'
     sleep 2
     monitor "screendump $tmp/screen.ppm"
@@ -52,6 +53,10 @@ echo "----- $MACHINE display -----"
 python3 "$HERE/screen-text.py" "$tmp/screen.ppm"
 echo "---------------------------"
 
+# The screen as text, in a file (grep -q in a pipeline could kill the
+# writer with SIGPIPE, which pipefail would count as a failure).
+python3 "$HERE/screen-text.py" "$tmp/screen.ppm" >"$tmp/screen.txt"
+
 fail=0
 if python3 "$HERE/screen-text.py" "$tmp/screen.ppm" --compare "$tmp/serial.txt"; then
     echo "PASS: display matches the serial console"
@@ -59,13 +64,13 @@ else
     echo "FAIL: display matches the serial console"
     fail=1
 fi
-if python3 "$HERE/screen-text.py" "$tmp/screen.ppm" | grep -qx "line 40 of the scrolling test"; then
+if grep -qx "line 40 of the scrolling test" "$tmp/screen.txt"; then
     echo "PASS: display shows the last line typed"
 else
     echo "FAIL: display shows the last line typed"
     fail=1
 fi
-if python3 "$HERE/screen-text.py" "$tmp/screen.ppm" | grep -qx "corrected"; then
+if grep -qx "pios> echo corrected" "$tmp/screen.txt"; then
     echo "PASS: backspace erases on the display"
 else
     echo "FAIL: backspace erases on the display"

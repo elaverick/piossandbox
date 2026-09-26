@@ -1,14 +1,15 @@
 //! The first program. The kernel starts it with handles to the hardware it
-//! used for its console (described by the `BootInfo` at the address in its
-//! argument) and the boot image. It starts the console server and hands it
-//! that hardware, then runs the other programs, each with a handle to the
-//! console: `hello`, then `echo`.
+//! used for its console and to the boot image (described by the `BootInfo`
+//! at the address in its argument). It starts the console server and hands
+//! it that hardware, starts the process manager and hands it the boot image,
+//! then keeps a shell running.
 
 #![no_std]
 #![no_main]
 
 use libpios::console::{self, CLIENT_BADGE, SETUP_BADGE};
-use libpios::rights::{RECEIVE, SEND, TRANSFER};
+use libpios::procman;
+use libpios::rights::{DUPLICATE, RECEIVE, SEND, TRANSFER};
 use libpios::{ExitStatus, Handle, Message, println};
 use pios_abi::{BOOT_INFO_MAGIC, BootInfo};
 use pios_bootfs::BootFs;
@@ -46,7 +47,7 @@ fn start_console(image: &BootFs, info: &BootInfo) -> Option<Handle> {
     let server = endpoint.duplicate(SEND | RECEIVE | TRANSFER, 0).ok()?;
     let program = image.find("console")?.data;
     // The server runs for good: dropping the child handle doesn't stop it.
-    drop(libpios::spawn(program, 0, Some(server)).ok()?);
+    drop(libpios::spawn(program, 0, Some(server), "").ok()?);
 
     let setup = endpoint.duplicate(SEND, SETUP_BADGE).ok()?;
     let mut ok = true;
@@ -83,28 +84,32 @@ fn start_console(image: &BootFs, info: &BootInfo) -> Option<Handle> {
     ok.then_some(endpoint)
 }
 
-/// Start `name` from the boot image with a console handle, and wait for it,
-/// reporting how it ended.
-fn run(image: &BootFs, console: &Handle, name: &str) -> bool {
-    let Some(file) = image.find(name) else {
-        println!("init: {} is not in the boot image", name);
-        return false;
-    };
-    let handle = console.duplicate(SEND | TRANSFER, CLIENT_BADGE).ok();
-    match libpios::spawn(file.data, 0, handle).and_then(|child| child.wait()) {
-        Ok(ExitStatus::Code(code)) => {
-            println!("[{} exited with code {}]", name, code);
-            code == 0
-        }
-        Ok(ExitStatus::Fault { esr }) => {
-            println!("[{} was stopped by a fault, syndrome {:#x}]", name, esr);
-            false
-        }
-        Err(e) => {
-            println!("init: could not start {}: {:?}", name, e);
-            false
-        }
-    }
+/// Start the process manager and set it up with the boot image and a
+/// console handle to give the programs it starts. Returns the endpoint to
+/// hand out client handles from.
+fn start_procman(image: &BootFs, info: &BootInfo, console: &Handle) -> Option<Handle> {
+    let endpoint = libpios::endpoint().ok()?;
+    let server = endpoint.duplicate(SEND | RECEIVE | TRANSFER, 0).ok()?;
+    let program = image.find("procman")?.data;
+    drop(libpios::spawn(program, 0, Some(server), "").ok()?);
+
+    let setup = endpoint.duplicate(SEND, procman::SETUP_BADGE).ok()?;
+    let consoles = console
+        .duplicate(SEND | DUPLICATE | TRANSFER, CLIENT_BADGE)
+        .ok()?;
+    let ok = give(
+        &setup,
+        procman::SETUP_BOOT_IMAGE,
+        info.boot_image_memory,
+        &[info.boot_image_size],
+    ) && give(
+        &setup,
+        procman::SETUP_CONSOLE,
+        consoles.into_raw() as u64,
+        &[],
+    );
+    let done = setup.call(Message::new(procman::SETUP_DONE, &[]));
+    (ok && matches!(done, Ok(reply) if reply.label == procman::OK)).then_some(endpoint)
 }
 
 fn main() -> i32 {
@@ -137,6 +142,27 @@ fn main() -> i32 {
         "init: the console server has {} serial port(s){}",
         uarts, display
     );
-    let ok = run(&image, &console, "hello") && run(&image, &console, "echo");
-    if ok { 0 } else { 1 }
+    let Some(procman) = start_procman(&image, info, &console) else {
+        println!("init: the process manager didn't start");
+        return 1;
+    };
+    let Some(shell) = image.find("shell") else {
+        println!("init: there is no shell");
+        return 1;
+    };
+
+    // Keep a shell running: start a new one whenever it ends.
+    loop {
+        let handle = procman
+            .duplicate(SEND | TRANSFER, procman::CLIENT_BADGE)
+            .ok();
+        match libpios::spawn(shell.data, 0, handle, "").and_then(|child| child.wait()) {
+            Ok(ExitStatus::Code(0)) => println!("init: the shell exited; starting a new one"),
+            Ok(status) => println!("init: the shell ended ({:?}); starting a new one", status),
+            Err(error) => {
+                println!("init: couldn't start the shell: {:?}", error);
+                return 1;
+            }
+        }
+    }
 }

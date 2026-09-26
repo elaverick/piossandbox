@@ -6,8 +6,9 @@
 //! value on success, or a negative [`Error`] code. Other registers are
 //! preserved.
 //!
-//! A program's entry point gets two arguments from whoever started it: a
-//! number in `x0`, and in `x1` a handle it was given (0 if none).
+//! A program's entry point gets arguments from whoever started it: a number
+//! in `x0`, in `x1` a handle it was given (0 if none), and in `x2` and `x3`
+//! the address and length of an argument string on its stack.
 //!
 //! Handles name kernel objects; see [`rights`] for what each allows, and
 //! [`Message`] for inter-process communication.
@@ -27,12 +28,16 @@ pub mod call {
     /// `yield() -> 0`: let other threads run for the rest of this time
     /// slice.
     pub const YIELD: usize = 2;
-    /// `spawn(ptr, len, arg, handle) -> handle`: start a new process
-    /// running the ELF executable in `[ptr, ptr + len)` of the caller's
-    /// memory, with `arg` as its entry point's first argument. If `handle`
-    /// isn't 0, it is moved to the new process (it needs the `TRANSFER`
-    /// right), which gets its number there as its second argument. Returns
-    /// a handle to the new process.
+    /// `spawn(ptr, len, arg, handle, args_ptr, args_len) -> handle`: start
+    /// a new process running the ELF executable in `[ptr, ptr + len)` of the
+    /// caller's memory, with `arg` as its entry point's first argument. If
+    /// `handle` isn't 0, it is moved to the new process (it needs the
+    /// `TRANSFER` right), which gets its number there as its second
+    /// argument. The `args_len` bytes at `args_ptr` (at most
+    /// [`ARGS_MAX`](super::ARGS_MAX); by convention the command line's
+    /// arguments, as UTF-8) are copied to the top of the new process's stack,
+    /// and their address and length are its third and fourth arguments.
+    /// Returns a handle to the new process.
     pub const SPAWN: usize = 3;
     /// `wait(handle) -> status`: wait for the process `handle` refers to to
     /// end, then close the handle. Returns an [`ExitStatus`](super::ExitStatus)
@@ -177,6 +182,8 @@ impl Message {
 
 /// The largest executable `spawn` accepts.
 pub const SPAWN_MAX: usize = 4 << 20;
+/// The most bytes of arguments `spawn` passes.
+pub const ARGS_MAX: usize = 1024;
 
 /// How a process ended, as `wait` reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -268,6 +275,8 @@ pub struct BootInfo {
     /// Where the boot image is mapped (read-only), and its size.
     pub boot_image: u64,
     pub boot_image_size: u64,
+    /// A read-only memory handle to the boot image, to pass on.
+    pub boot_image_memory: u64,
     /// The serial ports the kernel used as its console (`memory` 0: none).
     pub uarts: [UartInfo; 2],
     /// The display the kernel drew on (`memory` 0: none).

@@ -16,9 +16,9 @@ preemptive round-robin scheduling, a boot image from which the kernel
 starts `init`, and `init` the rest, synchronous IPC with handles, rights,
 badges and one-shot reply handles, and handles for device memory,
 interrupts and timers, with which a user-space console server drives the
-serial ports and the screen.
+serial ports and the screen, and a process manager and shell.
 
-Next: the process manager and the shell.
+Next: see the [Roadmap](#roadmap).
 
 ## Memory layout
 
@@ -186,7 +186,7 @@ and `libpios` both use.
 | 0 | `debug_write(ptr, len)`: write to the kernel console (temporary) |
 | 1 | `exit(code)` |
 | 2 | `yield()` |
-| 3 | `spawn(ptr, len, arg) -> handle` |
+| 3 | `spawn(ptr, len, arg, handle, args_ptr, args_len) -> handle` |
 | 4 | `wait(handle) -> exit status` |
 | 5 | `close(handle)` |
 | 6 | `endpoint() -> handle` |
@@ -237,9 +237,11 @@ system call wrappers, `print!`, panic handler; a heap will follow), and
 built as statically linked ELF executables linked at `0x40_0000`, with
 floating point. The kernel itself never uses the FP/SIMD registers, so a
 program's are preserved across system calls, and the scheduler saves and
-restores them when switching threads. A program's entry point gets one
-argument in `x0`, and programs may read the system counter (`CNTVCT_EL0`)
-directly for the time. They reach the board in the boot image (see
+restores them when switching threads. A program's entry point gets a
+number in `x0`, a start handle in `x1`, and an argument string (its command
+line's arguments, copied onto its stack by the kernel) in `x2`/`x3`; and
+programs may read the system counter (`CNTVCT_EL0`) directly for the
+time. They reach the board in the boot image (see
 [Decisions](#decisions)).
 
 ## Start-up and the boot image
@@ -276,6 +278,26 @@ the image be mapped straight into a process, and a program's read-only
 segments be mapped from it rather than copied (the ELF loader copies them
 for now).
 
+## The process manager and the shell
+
+The **process manager** runs programs by name: `init` gives it the boot
+image (as a read-only memory handle) and a console handle it can copy, and
+it answers `RUN` (a command line) by starting the program with a console
+handle and its arguments and handing back the process handle, and `LIST`
+with the programs' names. Today it is the only thing that knows where
+programs come from, so a file system can later slot in behind it without
+the shell changing.
+
+The **shell** gets a handle to the process manager (and its console through
+it) and nothing else. It runs built-ins itself and everything else through
+the process manager.
+
+How a program finds the services it needs is still ad hoc: it gets one
+start handle, and asks that service for others (the shell gets its console
+from the process manager). A small naming or bootstrap service, handing
+out handles to named services according to what a program is allowed, is
+the obvious next step once there are more services.
+
 ## Roadmap
 
 1. ~~Physical page allocator; map all RAM~~
@@ -287,7 +309,18 @@ for now).
 6. ~~IPC and capabilities~~ (endpoints, replies and process handles so
    far; memory and interrupt handles come with step 7)
 7. ~~User-space console server (device memory and interrupt handles)~~
-8. Process manager and the shell
+8. ~~Process manager and the shell~~
+
+Next, roughly in order:
+
+9. Memory for programs: a system call to map fresh memory, so `libpios`
+   can offer a heap (`alloc`), and shared memory between processes for
+   bulk data
+10. Stopping processes (Ctrl-C in the shell), and a process list (`ps`)
+11. An SD card driver and a FAT file system server, so programs can come
+    from the card (and the boot image shrinks; see [Decisions](#decisions))
+12. The other cores
+13. USB (behind PCIe on both boards) for a keyboard
 
 ## Decisions
 

@@ -9,8 +9,25 @@ ported from C to Rust, and is growing into a microkernel (see
 [docs/design.md](docs/design.md)). It brings up a console on the serial
 port(s) and the screen, prints a greeting plus a few facts about the
 machine, runs its self-tests, and then hands over to user space: `init`
-starts a console server, which drives the serial ports and the screen, and
-an `echo` program that echoes back anything typed on the serial console.
+starts a console server, which drives the serial ports and the screen, a
+process manager, and a shell you use over the serial console:
+
+```
+Welcome to the pios shell. Type 'help' for the commands.
+pios> hello from the shell
+Hello from user space!
+  arguments: from the shell
+  ...
+pios> crashtest
+[crashtest was stopped by a fault: bad memory access (syndrome 0x9200000f)]
+pios> help
+Built-in commands:
+  help     list the commands
+  echo     print its arguments
+  uptime   how long since the system started
+  exit     leave the shell (init starts a new one)
+Programs: crashtest fptest hello usertest
+```
 
 ![pios on HDMI, in QEMU at 1920x1080](docs/hdmi-qemu.png)
 
@@ -45,7 +62,7 @@ an `echo` program that echoes back anything typed on the serial console.
 | `src/stack.rs` | Kernel stacks for threads, with guard pages |
 | `src/syscall.rs`, `src/user.rs` | System calls, and checked access to user memory |
 | `abi/` | The system call interface, shared by the kernel and user programs |
-| `user/` | User programs: `libpios` (their runtime), `init`, the `console` server, `echo`, `hello`, and test programs |
+| `user/` | User programs: `libpios` (their runtime), `init`, the `console` server, the process manager (`procman`), the `shell`, `hello`, and test programs |
 | `src/heap.rs`, `src/allocator.rs` | The kernel heap behind `Box`/`Vec`/`String`, and its free-list allocator |
 | `src/sync.rs` | `SpinLock` (masks IRQs while held) |
 | `src/fdt.rs` | Device tree parser |
@@ -94,9 +111,10 @@ them, and the user programs if they have been built in `user/`.
 The serial test (`scripts/qemu-test.sh`) checks the banner (including that
 the kernel runs at EL1 and its exception, interrupt, memory, address space,
 user mode, thread and IPC self-test passed), checks that `init` starts from
-the boot image, sets up the console server and runs `hello`, then types a
-line and pastes a 12 KB burst that `echo` must echo back intact, all through
-the console server.
+the boot image and sets up the console server, then types commands into the
+shell: a built-in, a program with arguments, a program that crashes,
+`help`, a pasted burst of 300 `echo` commands (12 KB) whose output must all
+come back intact, and `exit`, after which `init` must start a new shell.
 
 The HDMI test (`scripts/qemu-screen-test.sh`) types enough to make the
 screen scroll, takes a screenshot through the QEMU monitor, turns the pixels
@@ -325,16 +343,14 @@ a directory, then each program on a page boundary.
 At boot the kernel runs five test programs from the boot image at once as
 part of its self-test. Then it starts `init`, with the whole boot image
 mapped read-only into it, and `init` starts everything else: the console
-server, then `hello`, then `echo`:
+server, the process manager and the shell:
 
 ```
-init: starting the system from a boot image of 8 programs
+init: starting the system from a boot image of 9 programs
 init: the console server has 1 serial port(s) and the display
-Hello from user space!
-  25 primes below 100: [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97]
-  (running at EL0, stack near 0x3fffffff80)
-[hello exited with code 0]
-[init exited with code 0]
+
+Welcome to the pios shell. Type 'help' for the commands.
+pios>
 ```
 
 ### Writing one
@@ -355,15 +371,19 @@ fn main() -> i32 {
 ```
 
 `libpios` provides the entry point, `print!`/`println!`, a panic handler
-(which prints and exits with code 101), the system calls, the argument the
-program was started with (`argument()`) and the time (`counter()`, reading
+(which prints and exits with code 101), the system calls, what the program
+was started with (`argument()`, `start_handle()`, and `args()` for its
+command line's arguments) and the time (`counter()`, reading
 the ARM generic timer's counter, which user programs may do directly). Programs are
 built for `aarch64-unknown-none` (with floating point) and linked at
 `0x40_0000` by `user/libpios/user.ld`, with code, constants and data on
 separate pages. To add one, add it to `user/Cargo.toml` and to `PROGRAMS` in
-`build.rs`, which puts it in the boot image. Programs start others with
-`libpios::spawn(elf_bytes, arg)`, which returns a `Child`: `child.wait()`
-waits for it to end, and dropping it gives up the handle.
+`build.rs`, which puts it in the boot image, and the shell can run it by
+name. A program the shell runs is given a console handle as its start
+handle; call `libpios::console::connect(handle)` to print through it (see
+`user/hello`). Programs start others with
+`libpios::spawn(elf_bytes, arg, handle, args)`, which returns a `Child`:
+`child.wait()` waits for it to end, and dropping it gives up the handle.
 
 ### System calls
 
@@ -376,7 +396,7 @@ defined once, in the `abi/` crate, which both sides use.
 | 0 | `debug_write(ptr, len)` | write to the kernel's console (temporary: for programs without a console handle, like the kernel's test programs) |
 | 1 | `exit(code)` | end the program |
 | 2 | `yield()` | let other threads run for the rest of this time slice |
-| 3 | `spawn(ptr, len, arg)` | start the ELF executable in the caller's memory as a new process; returns a handle to it |
+| 3 | `spawn(ptr, len, arg, handle, args_ptr, args_len)` | start the ELF executable in the caller's memory as a new process, passing it a number, a handle and an argument string; returns a handle to it |
 | 4 | `wait(handle)` | wait for that process to end, close the handle, and return its exit code or fault |
 | 5 | `close(handle)` | give up a handle |
 | 6 | `endpoint()` | make an IPC endpoint; returns a handle to it with every right |
@@ -479,12 +499,32 @@ handle to the server, which `libpios` uses for `print!`. The server:
   isn't answered yet: the server keeps its reply handle until input comes.
   It tells notifications, `init`'s set-up and clients apart by badge.
 
-`echo` (`user/echo`) is what the kernel's echo loop used to be, now a user
-program reading and writing through the server. The shell will replace it.
 
 A polled UART is only checked every 10 ms, so on real hardware a fast
 paste into RP1's UART0 can overflow its FIFO; the Pi 5's debug UART is
 interrupt-driven and doesn't have this problem.
+
+## The process manager and the shell
+
+The **process manager** (`user/procman`) starts programs by name. `init`
+gives it a read-only memory handle to the boot image (which the kernel
+handed `init`) and a console handle it can copy. Asked to run a command
+line, it finds the program, starts it with a copy of the console handle
+and the rest of the line as its arguments, and hands the caller the new
+process's handle to wait on. It only offers the programs that work when
+started that way: not `init`, the servers or the shell, nor the kernel's IPC
+self-test.
+
+The **shell** (`user/shell`) gets a handle to the process manager, and its
+console from it. It reads a line at a time (Backspace/Delete erase, Ctrl-C
+abandons the line), echoing as you type, and runs built-ins (`help`,
+`echo`, `uptime`, `exit`) itself and everything else through the process
+manager, waiting for it and reporting an exit code other than 0, or a
+fault. `init` keeps a shell running, starting a new one when one exits.
+
+The kernel copies a program's argument string (up to 1 KiB, passed to
+`spawn`) to the top of its new stack, like `argv`, and `libpios::args()`
+returns it.
 
 ## Threads and scheduling
 
