@@ -34,6 +34,10 @@ the machine, and echoes back anything typed on the serial console.
 | `src/paging.rs` | Page tables with typed permissions (W^X) |
 | `src/mmu.rs`, `src/cache.rs` | The kernel map, TTBR switching, address probes, cache maintenance |
 | `src/addrspace.rs` | User address spaces (TTBR0) |
+| `src/process.rs`, `src/elf.rs` | Loading ELF programs and running them at EL0 |
+| `src/syscall.rs`, `src/user.rs` | System calls, and checked access to user memory |
+| `abi/` | The system call interface, shared by the kernel and user programs |
+| `user/` | User programs: `libpios` (their runtime), `hello`, and test programs |
 | `src/heap.rs`, `src/allocator.rs` | The kernel heap behind `Box`/`Vec`/`String`, and its free-list allocator |
 | `src/sync.rs` | `SpinLock` (masks IRQs while held) |
 | `src/fdt.rs` | Device tree parser |
@@ -72,16 +76,17 @@ make test       # boot, type into UART0, and check the serial and HDMI output
 
 `make test-host` runs unit tests on your machine (no QEMU needed) for the
 modules that are plain logic, compiled unchanged from `src/`: the heap
-allocator, the frame allocator, the page tables, the device tree parser and
-the range set. They include randomized tests against simple models, and for
-the device tree parser, every truncation and single-byte corruption of a
-test tree (which must be rejected or handled, never crash). They also check
-the real Pi 4 and Pi 5 device trees if `make sdcard` has downloaded them.
+allocator, the frame allocator, the page tables, the device tree parser, the
+ELF parser and the range set. They include randomized tests against simple
+models, and for the two parsers, every truncation and single-byte corruption
+of a test input (which must be rejected or handled, never crash). They also
+check the real Pi 4 and Pi 5 device trees if `make sdcard` has downloaded
+them, and the user programs if they have been built in `user/`.
 
 The serial test (`scripts/qemu-test.sh`) checks the banner (including that
-the kernel runs at EL1 and its exception, interrupt, memory and address
-space self-test passed), types a line, and pastes a 12 KB burst that must be echoed back
-intact.
+the kernel runs at EL1 and its exception, interrupt, memory, address space
+and user mode self-test passed), checks the `hello` user program's output,
+types a line, and pastes a 12 KB burst that must be echoed back intact.
 
 The HDMI test (`scripts/qemu-screen-test.sh`) types enough to make the
 screen scroll, takes a screenshot through the QEMU monitor, turns the pixels
@@ -287,6 +292,82 @@ kernel data isn't executable, and that all memory comes back.
 - The framebuffer is mapped non-cacheable, so the GPU sees what is drawn.
 - Mailbox messages sit on cache lines of their own; they are cleaned to
   memory before the GPU reads them and invalidated before we read the reply.
+
+## User programs
+
+User programs run at EL0, each in its own address space, and talk to the
+kernel through system calls. The kernel's build (`build.rs`) builds the
+programs in `user/` and embeds them in the kernel image; later they will
+come from an initramfs.
+
+At boot the kernel runs two test programs as part of its self-test, then
+`hello`:
+
+```
+Hello from user space!
+  25 primes below 100: [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97]
+  (running at EL0, stack near 0x3fffffff80)
+[hello exited with code 0]
+```
+
+### Writing one
+
+A program is a `no_std` Rust binary in the `user/` workspace using
+`libpios`:
+
+```rust
+#![no_std]
+#![no_main]
+
+libpios::pios_main!(main);
+
+fn main() -> i32 {
+    libpios::println!("hello");
+    0 // the exit code
+}
+```
+
+`libpios` provides the entry point, `print!`/`println!`, a panic handler
+(which prints and exits with code 101) and the system calls. Programs are
+built for `aarch64-unknown-none` (with floating point) and linked at
+`0x40_0000` by `user/libpios/user.ld`, with code, constants and data on
+separate pages. To add one, add it to `user/Cargo.toml` and to `PROGRAMS` in
+`build.rs`.
+
+### System calls
+
+`svc #0` with the call number in `x8` and arguments in `x0`-`x5`; the result
+comes back in `x0`, negative for an error. The numbers and error codes are
+defined once, in the `abi/` crate, which both sides use.
+
+| Number | Call | |
+| --- | --- | --- |
+| 0 | `debug_write(ptr, len)` | write to the kernel console (temporary, until the console server exists) |
+| 1 | `exit(code)` | end the program |
+
+### Protection
+
+- **Loading.** The ELF loader (`src/elf.rs`) checks everything before
+  loading: segments inside user space, file data inside the file, no
+  segment both writable and executable, no two segments sharing a page, the
+  entry point in code. Each segment is mapped with the permissions its flags
+  ask for, plus a 64 KiB stack with an unmapped guard page below it.
+- **Starting.** Every register is cleared before the program starts, so no
+  kernel values leak into user space.
+- **Pointers.** A pointer passed to a system call is only used after the
+  MMU confirms, page by page, that the program itself could read it
+  (`UserSlice` in `src/user.rs`). Kernel addresses, unmapped memory and
+  ranges that wrap around are refused with `BadAddress`.
+- **Faults.** A program that faults (bad memory access, undefined
+  instruction, ...) is stopped and reported, and the kernel carries on.
+
+The self-test's `usertest` program checks the system calls from user space
+(including that bad pointers are refused, and that a long computation comes
+out right while timer interrupts arrive), and `crashtest` reads kernel
+memory, which must stop it with a fault.
+
+There is no scheduler yet: the kernel runs one program at a time, to
+completion.
 
 ## Heap
 

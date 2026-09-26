@@ -25,6 +25,8 @@ mod board;
 mod cache;
 mod console;
 mod cpu;
+#[allow(dead_code)] // shared with the host tests, which use more of it
+mod elf;
 mod exception;
 #[allow(dead_code)] // shared with the host tests, which use more of it
 mod fdt;
@@ -42,11 +44,14 @@ mod mmio;
 mod mmu;
 #[allow(dead_code)] // shared with the host tests, which use more of it
 mod paging;
+mod process;
 #[allow(dead_code)] // shared with the host tests, which use more of it
 mod ranges;
 mod sync;
+mod syscall;
 mod timer;
 mod uart;
+mod user;
 
 use core::panic::PanicInfo;
 
@@ -176,7 +181,7 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     }
     match self_test {
         Ok(()) => println!(
-            "  self-test       : svc, brk, timer interrupts, MMU, atomics, heap and address spaces OK"
+            "  self-test       : svc, brk, timer interrupts, MMU, atomics, heap, address spaces and user mode OK"
         ),
         Err(e) => println!("  self-test       : FAILED: {}", e),
     }
@@ -210,6 +215,10 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
             size >> 20
         );
     }
+
+    // The first user program.
+    println!();
+    run_program("hello", process::programs::HELLO);
 
     println!();
     println!("Type something and it will be echoed back.");
@@ -281,7 +290,19 @@ fn self_test() -> Result<(), &'static str> {
 
     heap::self_test()?;
     addrspace::self_test()?;
+    process::self_test()?;
     Ok(())
+}
+
+/// Load and run a user program, reporting how it ended.
+fn run_program(name: &'static str, image: &[u8]) {
+    match process::Process::load(name, image) {
+        Ok(program) => match program.run() {
+            process::Exit::Code(code) => println!("[{} exited with code {}]", program.name(), code),
+            process::Exit::Fault(fault) => println!("[{} was stopped: {}]", program.name(), fault),
+        },
+        Err(e) => println!("[{} could not be loaded: {}]", name, e),
+    }
 }
 
 /// The device tree the firmware left at `phys`, if there is a valid one

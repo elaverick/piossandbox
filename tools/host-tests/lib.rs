@@ -7,6 +7,8 @@
 pub mod addr;
 #[path = "../../src/allocator.rs"]
 pub mod allocator;
+#[path = "../../src/elf.rs"]
+pub mod elf;
 #[path = "../../src/fdt.rs"]
 pub mod fdt;
 #[path = "../../src/frames.rs"]
@@ -18,6 +20,8 @@ pub mod ranges;
 
 #[cfg(test)]
 mod allocator_tests;
+#[cfg(test)]
+mod elf_tests;
 #[cfg(test)]
 mod fdt_tests;
 #[cfg(test)]

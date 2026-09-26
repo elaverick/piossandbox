@@ -1,0 +1,15 @@
+# User programs for pios. Built by the kernel's build.rs, which embeds them
+# in the kernel image (until programs are loaded from an initramfs).
+[workspace]
+members = ["libpios", "hello", "usertest", "crashtest"]
+resolver = "3"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

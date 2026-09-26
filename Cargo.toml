@@ -12,6 +12,7 @@ test = false
 bench = false
 
 [dependencies]
+pios-abi = { path = "abi" }
 
 [profile.dev]
 panic = "abort"

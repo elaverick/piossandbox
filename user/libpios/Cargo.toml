@@ -1,0 +1,9 @@
+[package]
+name = "libpios"
+version = "0.1.0"
+edition = "2024"
+description = "Runtime for pios user programs: entry point, system calls, printing"
+publish = false
+
+[dependencies]
+pios-abi = { path = "../../abi" }

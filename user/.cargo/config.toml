@@ -1,0 +1,11 @@
+[build]
+target = "aarch64-unknown-none"
+
+[target.aarch64-unknown-none]
+rustflags = [
+    "-C", "target-cpu=cortex-a72",
+    # user.ld, found through libpios's build script.
+    "-C", "link-arg=-Tuser.ld",
+    # Pages are 4 KiB; don't pad segments to 64 KiB.
+    "-C", "link-arg=-zmax-page-size=4096",
+]

@@ -298,6 +298,79 @@ switch_kernel_tables:
     isb
     ret
 
+// User mode.
+//
+// run_user(entry, stack) runs user code at EL0 from `entry` with the stack
+// pointer at `stack`, and returns only when the kernel calls
+// return_to_kernel(value), which makes run_user return `value`. That
+// happens from an exception handler (when the program exits or faults):
+// the handler's frames on the kernel stack are simply abandoned, so it must
+// hold nothing that needs dropping.
+//
+// While the program runs, exceptions from it arrive on the kernel stack
+// just below run_user's saved registers.
+
+.equ USER_SAVE_SIZE, 112
+
+.global run_user
+run_user:
+    // Save the callee-saved registers and the interrupt mask, and remember
+    // where they are.
+    sub     sp, sp, #USER_SAVE_SIZE
+    stp     x19, x20, [sp, #0]
+    stp     x21, x22, [sp, #16]
+    stp     x23, x24, [sp, #32]
+    stp     x25, x26, [sp, #48]
+    stp     x27, x28, [sp, #64]
+    stp     x29, x30, [sp, #80]
+    mrs     x2, daif
+    str     x2, [sp, #96]
+    adrp    x2, user_return_sp
+    mov     x3, sp
+    str     x3, [x2, :lo12:user_return_sp]
+
+    msr     sp_el0, x1
+    msr     elr_el1, x0
+    msr     spsr_el1, xzr               // EL0, interrupts enabled
+
+    // Start the program with every register cleared, so no kernel values
+    // leak into user space.
+    .irp n, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30
+    mov     x\n, xzr
+    .endr
+    // (The kernel itself never uses the FP/SIMD registers, but programs do.)
+    .arch_extension fp
+    .arch_extension simd
+    .irp n, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
+    movi    v\n\().2d, #0
+    .endr
+    msr     fpcr, xzr
+    msr     fpsr, xzr
+    eret
+
+.global return_to_kernel
+return_to_kernel:
+    adrp    x2, user_return_sp
+    ldr     x3, [x2, :lo12:user_return_sp]
+    mov     sp, x3
+    ldr     x2, [sp, #96]
+    msr     daif, x2
+    ldp     x19, x20, [sp, #0]
+    ldp     x21, x22, [sp, #16]
+    ldp     x23, x24, [sp, #32]
+    ldp     x25, x26, [sp, #48]
+    ldp     x27, x28, [sp, #64]
+    ldp     x29, x30, [sp, #80]
+    add     sp, sp, #USER_SAVE_SIZE
+    ret                                 // from run_user, with x0 = value
+
+.section ".bss", "aw", @nobits
+.balign 8
+user_return_sp:
+    .skip 8
+
+.section ".text", "ax"
+
 // Exception vector table: 16 entries of 0x80 bytes, 2 KiB aligned.
 //
 // Every entry saves the interrupted state in a trap frame on the stack

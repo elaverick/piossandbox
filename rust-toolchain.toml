@@ -1,4 +1,4 @@
 [toolchain]
 channel = "stable"
-targets = ["aarch64-unknown-none-softfloat"]
+targets = ["aarch64-unknown-none-softfloat", "aarch64-unknown-none"]
 components = ["llvm-tools"]

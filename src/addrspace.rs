@@ -100,6 +100,27 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// Copy `data` into this address space at `va` (through the kernel's
+    /// view of the pages, so it works whatever the pages' user
+    /// permissions). The pages must be mapped.
+    pub fn write(&mut self, va: usize, data: &[u8]) -> Result<(), MapError> {
+        let mut done = 0;
+        while done < data.len() {
+            let at = va + done;
+            let page = at & !(PAGE_SIZE - 1);
+            let frame = self.pages.get(&page).ok_or(MapError::NotMapped)?;
+            let offset = at - page;
+            let chunk = (PAGE_SIZE - offset).min(data.len() - done);
+            let dst = (frame.addr().to_virt() + offset).as_ptr::<u8>();
+            // SAFETY: the frame belongs to this address space and `chunk`
+            // stays within it; the kernel reaches it through the linear map.
+            unsafe { core::ptr::copy_nonoverlapping(data[done..].as_ptr(), dst, chunk) };
+            crate::cache::clean_to_unification(dst as usize, chunk);
+            done += chunk;
+        }
+        Ok(())
+    }
+
     /// Make this the current lower half.
     pub fn activate(&self) {
         mmu::set_user_tables(Some(self.table.root()));

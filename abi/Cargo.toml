@@ -1,0 +1,8 @@
+[package]
+name = "pios-abi"
+version = "0.1.0"
+edition = "2024"
+description = "The pios system call interface, shared by the kernel and user programs"
+publish = false
+
+[dependencies]

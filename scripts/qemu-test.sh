@@ -62,7 +62,9 @@ check() {
 check "Hello, world!" "kernel prints greeting"
 check "on Raspberry Pi" "kernel prints banner"
 check "running at EL1" "kernel drops to EL1"
-check "MMU, atomics, heap and address spaces OK" "exception, interrupt, memory and address space self-test passes"
+check "address spaces and user mode OK" "exception, interrupt, memory, address space and user mode self-test passes"
+check "Hello from user space!" "a user program runs and prints"
+check "[hello exited with code 0]" "the user program exits back to the kernel"
 check "Type something" "kernel reaches echo loop"
 check "$INPUT" "kernel echoes input"
 expected_burst=$(for i in $(seq -w 1 300); do echo "burst $i abcdefghijklmnopqrstuvwxyz"; done)

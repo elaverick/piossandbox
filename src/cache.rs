@@ -41,3 +41,16 @@ pub fn clean(start: usize, len: usize) {
 pub fn invalidate(start: usize, len: usize) {
     for_each_line!("ivac", start, len);
 }
+
+/// Write any cached changes in the range out as far as the point where
+/// instruction fetches see them (for code written through the data cache).
+pub fn clean_to_unification(start: usize, len: usize) {
+    for_each_line!("cvau", start, len);
+}
+
+/// Discard all instruction cache contents, so newly written code is
+/// fetched from memory.
+pub fn invalidate_instruction_cache() {
+    // SAFETY: invalidating the instruction cache only forces refetches.
+    unsafe { asm!("dsb ish", "ic iallu", "dsb ish", "isb", options(nostack)) };
+}

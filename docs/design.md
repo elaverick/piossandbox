@@ -10,12 +10,12 @@ and the plan for getting there.
 
 Done: boot on the Raspberry Pi 4 and 5, serial and HDMI console, exceptions,
 GIC interrupts and a timer tick, MMU and caches, kernel heap, physical page
-allocator, higher-half kernel with W^X mappings, per-process address spaces
-(built and checked, but nothing runs in user mode yet).
+allocator, higher-half kernel with W^X mappings, per-process address spaces,
+user mode with an ELF loader and the first system calls (one program at a
+time, built into the kernel image).
 
-Next: user mode (EL0) and the system call interface, threads and scheduling,
-loading programs from an initramfs, IPC, capabilities, user-space drivers,
-the shell.
+Next: threads and scheduling, loading programs from an initramfs, IPC,
+capabilities, user-space drivers, the shell.
 
 ## Memory layout
 
@@ -108,11 +108,31 @@ Until the console server exists, the kernel keeps a temporary **debug print**
 system call so early user programs can show they are alive. It will be
 removed once the console server works.
 
+## System calls
+
+`svc #0`, with the call number in `x8` and up to six arguments in `x0`-`x5`.
+The result comes back in `x0`: non-negative for success, or a negative error
+code. The numbers and codes live in the `pios-abi` crate, which the kernel
+and `libpios` both use.
+
+| Number | Call |
+| --- | --- |
+| 0 | `debug_write(ptr, len)`: write to the kernel console (temporary) |
+| 1 | `exit(code)` |
+
+IPC calls (send, receive, call, reply) and handle management come next.
+
+Every pointer argument is checked with the MMU, from the calling program's
+point of view, before the kernel touches the memory.
+
 ## User programs
 
 Written in Rust, `no_std`, on a small runtime crate (`libpios`: entry point,
-system call wrappers, heap, `print!`, panic handler), and built as
-statically linked ELF executables. They reach the board in an initramfs: a
+system call wrappers, `print!`, panic handler; a heap will follow), and
+built as statically linked ELF executables linked at `0x40_0000`, with
+floating point. The kernel itself never uses the FP/SIMD registers, so a
+program's are preserved across system calls; the scheduler will have to
+save and restore them when switching threads. They reach the board in an initramfs: a
 cpio archive the firmware loads after the kernel (`initramfs ... followkernel`
 in `config.txt`) and describes in the device tree.
 
@@ -120,7 +140,7 @@ in `config.txt`) and describes in the device tree.
 
 1. ~~Physical page allocator; map all RAM~~
 2. ~~Higher-half kernel; per-process address spaces~~
-3. User mode, system call interface, debug print; a first user program
+3. ~~User mode, system call interface, debug print; a first user program~~
 4. Threads, context switching (including FP/SIMD state), preemptive scheduling
 5. initramfs (cpio) and an ELF loader; the kernel starts `/init`
 6. IPC and capabilities

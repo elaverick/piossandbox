@@ -5,3 +5,10 @@ version = 4
 [[package]]
 name = "pios"
 version = "0.1.0"
+dependencies = [
+ "pios-abi",
+]
+
+[[package]]
+name = "pios-abi"
+version = "0.1.0"

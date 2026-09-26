@@ -158,7 +158,12 @@ pub fn putc(byte: u8) {
 
 /// Send a string, translating `\n` into `\r\n` for serial terminals.
 pub fn puts(s: &str) {
-    for byte in s.bytes() {
+    write_bytes(s.as_bytes());
+}
+
+/// Send bytes (which needn't be UTF-8), translating `\n` into `\r\n`.
+pub fn write_bytes(bytes: &[u8]) {
+    for &byte in bytes {
         if byte == b'\n' {
             putc(b'\r');
         }
