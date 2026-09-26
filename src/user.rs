@@ -17,23 +17,30 @@ pub struct UserSlice {
     len: usize,
 }
 
+/// Check that the running program could make `kind` of access to every
+/// page of `[addr, addr + len)`. An empty range touches no memory, so any
+/// address will do (Rust uses a dangling placeholder pointer for empty
+/// slices).
+fn check(addr: usize, len: usize, kind: Probe) -> Result<(), Error> {
+    if len == 0 {
+        return Ok(());
+    }
+    let end = addr.checked_add(len).ok_or(Error::BadAddress)?;
+    if end > USER_END {
+        return Err(Error::BadAddress);
+    }
+    let mut page = addr & !(PAGE_SIZE - 1);
+    while page < end {
+        mmu::probe(page, kind).map_err(|_| Error::BadAddress)?;
+        page += PAGE_SIZE;
+    }
+    Ok(())
+}
+
 impl UserSlice {
-    /// Check `[addr, addr + len)` with the MMU, as a user-mode read. An
-    /// empty range touches no memory, so any address will do (Rust uses a
-    /// dangling placeholder pointer for empty slices).
+    /// Check `[addr, addr + len)` with the MMU, as a user-mode read.
     pub fn new(addr: usize, len: usize) -> Result<UserSlice, Error> {
-        if len == 0 {
-            return Ok(UserSlice { addr, len });
-        }
-        let end = addr.checked_add(len).ok_or(Error::BadAddress)?;
-        if end > USER_END {
-            return Err(Error::BadAddress);
-        }
-        let mut page = addr & !(PAGE_SIZE - 1);
-        while page < end {
-            mmu::probe(page, Probe::UserRead).map_err(|_| Error::BadAddress)?;
-            page += PAGE_SIZE;
-        }
+        check(addr, len, Probe::UserRead)?;
         Ok(UserSlice { addr, len })
     }
 
@@ -62,6 +69,39 @@ impl UserSlice {
                 dst.as_mut_ptr(),
                 dst.len(),
             )
+        };
+    }
+}
+
+/// A range of the running program's memory that it may write.
+pub struct UserSliceMut {
+    addr: usize,
+    len: usize,
+}
+
+impl UserSliceMut {
+    /// Check `[addr, addr + len)` with the MMU, as a user-mode write.
+    pub fn new(addr: usize, len: usize) -> Result<UserSliceMut, Error> {
+        check(addr, len, Probe::UserWrite)?;
+        Ok(UserSliceMut { addr, len })
+    }
+
+    /// Copy `src` to `offset`.
+    ///
+    /// # Panics
+    ///
+    /// If that runs past the end of the slice.
+    pub fn write(&self, offset: usize, src: &[u8]) {
+        assert!(
+            offset + src.len() <= self.len,
+            "write past the end of a user slice"
+        );
+        // SAFETY: `new` checked the program can write the whole range, and
+        // its mappings can't have changed since (see `UserSlice::read`).
+        // The kernel never holds references into user memory, so this
+        // aliases nothing.
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.as_ptr(), (self.addr + offset) as *mut u8, src.len())
         };
     }
 }

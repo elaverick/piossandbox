@@ -28,7 +28,7 @@ fn run(image: &BootFs, name: &str) -> bool {
         println!("init: {} is not in the boot image", name);
         return false;
     };
-    match libpios::spawn(file.data, 0).and_then(|child| child.wait()) {
+    match libpios::spawn(file.data, 0, None).and_then(|child| child.wait()) {
         Ok(ExitStatus::Code(code)) => {
             println!("[{} exited with code {}]", name, code);
             code == 0

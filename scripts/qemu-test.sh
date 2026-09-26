@@ -62,7 +62,7 @@ check() {
 check "Hello, world!" "kernel prints greeting"
 check "on Raspberry Pi" "kernel prints banner"
 check "running at EL1" "kernel drops to EL1"
-check "address spaces, user mode and threads OK" "exception, interrupt, memory, user mode and thread self-test passes"
+check "address spaces, user mode, threads and IPC OK" "exception, interrupt, memory, user mode, thread and IPC self-test passes"
 check "Hello from user space!" "a user program runs and prints"
 check "[hello exited with code 0]" "the user program exits back to the kernel"
 check "init: starting the system from a boot image" "the kernel starts init from the boot image"

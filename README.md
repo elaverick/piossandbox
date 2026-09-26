@@ -36,7 +36,7 @@ the machine, and echoes back anything typed on the serial console.
 | `src/addrspace.rs` | User address spaces (TTBR0) |
 | `src/process.rs`, `src/elf.rs` | Loading ELF programs and starting them at EL0; starting `init` |
 | `src/bootimage.rs`, `bootfs/` | The boot image of user programs built into the kernel, and its format |
-| `src/handle.rs` | Per-process handle tables |
+| `src/handle.rs`, `src/ipc.rs` | Per-process handle tables with rights; IPC endpoints and reply handles |
 | `src/thread.rs`, `src/thread.s` | Threads, the context switch and the preemptive scheduler |
 | `src/stack.rs` | Kernel stacks for threads, with guard pages |
 | `src/syscall.rs`, `src/user.rs` | System calls, and checked access to user memory |
@@ -89,7 +89,7 @@ them, and the user programs if they have been built in `user/`.
 
 The serial test (`scripts/qemu-test.sh`) checks the banner (including that
 the kernel runs at EL1 and its exception, interrupt, memory, address space,
-user mode and thread self-test passed), checks that `init` starts from the
+user mode, thread and IPC self-test passed), checks that `init` starts from the
 boot image and runs the `hello` user program,
 types a line, and pastes a 12 KB burst that must be echoed back intact.
 
@@ -317,13 +317,13 @@ kernel (see [docs/design.md](docs/design.md#decisions) for why this rather
 than a Linux-style initramfs). The boot image is a small read-only archive:
 a directory, then each program on a page boundary.
 
-At boot the kernel runs four test programs from the boot image at once as
+At boot the kernel runs five test programs from the boot image at once as
 part of its self-test. Then it starts `init`, with the whole boot image
 mapped read-only into it, and `init` starts everything else, for now just
 `hello`:
 
 ```
-init: starting the system from a boot image of 5 programs
+init: starting the system from a boot image of 6 programs
 Hello from user space!
   25 primes below 100: [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97]
   (running at EL0, stack near 0x3fffffff80)
@@ -373,10 +373,48 @@ defined once, in the `abi/` crate, which both sides use.
 | 3 | `spawn(ptr, len, arg)` | start the ELF executable in the caller's memory as a new process; returns a handle to it |
 | 4 | `wait(handle)` | wait for that process to end, close the handle, and return its exit code or fault |
 | 5 | `close(handle)` | give up a handle |
+| 6 | `endpoint()` | make an IPC endpoint; returns a handle to it with every right |
+| 7 | `duplicate(handle, rights, badge)` | copy an endpoint handle with the same or fewer rights, perhaps stamping a badge |
+| 8 | `send(endpoint, message)` | send a message, waiting until it is received |
+| 9 | `call(endpoint, message)` | send a message and wait for the reply |
+| 10 | `receive(endpoint, message)` | wait for a message |
+| 11 | `reply(reply, message)` | answer a call, using up its reply handle |
+
+### Handles and IPC
 
 Handles are numbers in a per-process table the kernel keeps, so they can't
-be forged; for now the only kind refers to a child process. They are the
-start of the capability system in [docs/design.md](docs/design.md).
+be forged, and each carries rights (send, receive, duplicate, transfer,
+wait) that the system calls check. Copies can have fewer rights, never
+more. `spawn` can pass the new process one handle, to start talking to it.
+
+IPC is synchronous, as in L4, seL4 and QNX: a client *calls* an endpoint
+and waits; a server *receives*, then *replies* through the one-shot reply
+handle that came with the call. A message is a label, 12 data words and at
+most one handle, which moves to the receiver. A server can give each client
+a **badged** copy of its endpoint handle, and messages through it arrive
+stamped with that badge, so it knows who is calling. If every handle on
+one side of an endpoint closes, or a server drops a reply handle without
+replying, whoever is waiting on the other side gets `PeerGone` instead of
+waiting forever. The design and its gaps are in
+[docs/design.md](docs/design.md#ipc).
+
+In `libpios`, a `Handle` closes itself when dropped, sending a handle in a
+`Message` moves it, and a `Reply` is used up by replying:
+
+```rust
+let server = libpios::endpoint()?;
+let client = server.duplicate(rights::SEND, 42)?; // give this to a client
+
+// In the client:
+let answer = client.call(Message::new(ADD, &[2, 3]))?;
+
+// In the server:
+let request = server.receive()?; // request.badge == 42
+if let Some(reply) = request.reply {
+    let [a, b, ..] = request.message.data;
+    reply.reply(Message::new(OK, &[a + b]))?;
+}
+```
 
 ### Protection
 
@@ -398,7 +436,10 @@ start of the capability system in [docs/design.md](docs/design.md).
 The self-test's `usertest` program checks the system calls from user space
 (including that bad pointers are refused, and that a long computation comes
 out right while timer interrupts arrive), and `crashtest` reads kernel
-memory, which must stop it with a fault.
+memory, which must stop it with a fault. `ipctest` runs as two processes
+that call each other, pass handles, and check that badges arrive, rights
+are enforced, reply handles work once, and closing one side wakes the
+other with `PeerGone`; the kernel then checks no endpoint was leaked.
 
 ## Threads and scheduling
 

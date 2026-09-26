@@ -17,7 +17,7 @@ use crate::bootimage;
 use crate::cache;
 use crate::elf::{Elf, ElfError};
 use crate::exception::{KIND, Syndrome, TrapFrame};
-use crate::handle::HandleTable;
+use crate::handle::{Handle, HandleTable};
 use crate::paging::{Access, MapError};
 use crate::sync::SpinLock;
 use crate::thread::{self, JoinHandle};
@@ -152,24 +152,47 @@ impl Process {
 }
 
 /// Load the ELF executable `image` as a new process and start running it,
-/// with `arg` as the argument to its entry point. Join the returned handle
-/// to wait for it to end.
-pub fn spawn(name: &'static str, image: &[u8], arg: usize) -> Result<JoinHandle, LoadError> {
+/// with `arg` as the first argument to its entry point. If there is a
+/// `handle`, the new process gets it, and its number there as the second
+/// argument. Join the returned handle to wait for it to end.
+pub fn spawn(
+    name: &'static str,
+    image: &[u8],
+    arg: usize,
+    handle: Option<Handle>,
+) -> Result<JoinHandle, LoadError> {
     let (process, entry) = Process::load(image)?;
-    thread::spawn_user(name, Arc::new(process), entry, STACK_TOP, arg)
-        .map_err(|_| LoadError::NoThread)
+    start(name, process, entry, arg, handle)
 }
 
-/// Start `init` from the boot image, with the whole boot image mapped
-/// read-only at `BOOT_IMAGE_ADDR`.
-pub fn spawn_init() -> Result<JoinHandle, LoadError> {
+/// Start the program `name` from the boot image, with the whole boot image
+/// mapped read-only at `BOOT_IMAGE_ADDR`, which is its argument. That is how
+/// the kernel starts `init` (and its IPC self-test).
+pub fn spawn_from_boot_image(name: &'static str) -> Result<JoinHandle, LoadError> {
     let image = bootimage::image();
-    let init = image.find("init").ok_or(LoadError::Missing)?;
-    let (mut process, entry) = Process::load(init.data)?;
+    let program = image.find(name).ok_or(LoadError::Missing)?;
+    let (mut process, entry) = Process::load(program.data)?;
     process
         .space
         .map_static(BOOT_IMAGE_ADDR, image.as_bytes())?;
-    thread::spawn_user("init", Arc::new(process), entry, STACK_TOP, BOOT_IMAGE_ADDR)
+    start(name, process, entry, BOOT_IMAGE_ADDR, None)
+}
+
+fn start(
+    name: &'static str,
+    process: Process,
+    entry: usize,
+    arg: usize,
+    handle: Option<Handle>,
+) -> Result<JoinHandle, LoadError> {
+    let handle = match handle {
+        Some(handle) => {
+            let number = process.handles.lock().insert(handle);
+            number.unwrap_or_else(|_| unreachable!("a new handle table has room"))
+        }
+        None => 0,
+    };
+    thread::spawn_user(name, Arc::new(process), entry, STACK_TOP, [arg, handle])
         .map_err(|_| LoadError::NoThread)
 }
 
@@ -194,23 +217,26 @@ pub fn user_fault(frame: &TrapFrame, index: u64) -> ! {
 /// - `usertest` checks the system call interface from user space;
 /// - two `fptest`s each fill the FP/SIMD registers with their own values
 ///   and check them while being switched in and out;
-/// - `crashtest` reads kernel memory and must be stopped by a fault.
+/// - `crashtest` reads kernel memory and must be stopped by a fault;
+/// - `ipctest` checks IPC and handles, as two processes.
 ///
-/// None may leak memory or threads.
+/// None may leak memory, threads or endpoints.
 pub fn self_test() -> Result<(), &'static str> {
     use crate::memory::frame_stats;
     use crate::timer::tick_count;
 
     let free_before = frame_stats().free;
+    let endpoints_before = crate::ipc::live_endpoints();
     let before = thread::stats();
     let ticks_before = tick_count();
     let start = |name, arg| {
         let image = bootimage::program(name).ok_or("a test program is missing")?;
-        spawn(name, image, arg).map_err(|_| "a test program failed to load")
+        spawn(name, image, arg, None).map_err(|_| "a test program failed to load")
     };
     let usertest = start("usertest", 0)?;
     let fptests = [start("fptest", 1)?, start("fptest", 2)?];
     let crashtest = start("crashtest", 0)?;
+    let ipctest = spawn_from_boot_image("ipctest").map_err(|_| "ipctest failed to load")?;
 
     if !matches!(usertest.join(), Exit::Code(0)) {
         return Err("usertest failed");
@@ -227,6 +253,9 @@ pub fn self_test() -> Result<(), &'static str> {
             if Syndrome(fault.esr).is_data_abort() && fault.far == 0xFFFF_FF80_0008_0000 => {}
         _ => return Err("crashtest wasn't stopped when reading kernel memory"),
     }
+    if !matches!(ipctest.join(), Exit::Code(0)) {
+        return Err("ipctest failed");
+    }
 
     // The programs compute for long enough that the timer tick preempts
     // them, and the results show that didn't disturb them.
@@ -242,6 +271,9 @@ pub fn self_test() -> Result<(), &'static str> {
     }
     if frame_stats().free != free_before {
         return Err("user programs leaked memory");
+    }
+    if crate::ipc::live_endpoints() != endpoints_before {
+        return Err("endpoints leaked");
     }
     Ok(())
 }

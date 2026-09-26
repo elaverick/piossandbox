@@ -58,7 +58,7 @@ fn main() -> i32 {
                 == Err(Error::InvalidArgument),
         ),
         ("read-only data is intact", CONSTANT == 0x1234_5678),
-        ("spawning something that isn't a program is refused", libpios::spawn(&not_elf, 0).err() == Some(Error::InvalidArgument)),
+        ("spawning something that isn't a program is refused", libpios::spawn(&not_elf, 0, None).err() == Some(Error::InvalidArgument)),
         (
             "spawning from a bad pointer is refused",
             raw_syscall(call::SPAWN, 0xFFFF_FF80_0008_0000, 64, 0) == Err(Error::BadAddress),

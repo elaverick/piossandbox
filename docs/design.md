@@ -13,10 +13,11 @@ GIC interrupts and a timer tick, MMU and caches, kernel heap, physical page
 allocator, higher-half kernel with W^X mappings, per-process address spaces,
 user mode with an ELF loader and the first system calls, threads with
 preemptive round-robin scheduling, a boot image from which the kernel
-starts `init`, and `init` the rest, with the first handles (to child
-processes).
+starts `init`, and `init` the rest, and synchronous IPC with handles,
+rights, badges and one-shot reply handles.
 
-Next: IPC, capabilities, user-space drivers, the shell.
+Next: handles for memory and interrupts, so drivers can run in user space;
+then the console server, the process manager and the shell.
 
 ## Memory layout
 
@@ -66,8 +67,34 @@ IPC is **synchronous send / receive / reply**, as in L4, seL4 and QNX:
   reply arrives.
 - A server *receives* on an endpoint, blocking until a message arrives,
   then *replies*.
-- Short messages travel in registers; bulk data goes through shared memory
-  that one side maps for the other.
+- A plain *send* waits only until a receiver has taken the message.
+
+As built (`src/ipc.rs`):
+
+- **Messages** are 128 bytes in the caller's memory (`pios_abi::Message`): a
+  label saying what the message means, 12 data words, and at most one
+  handle, which moves to the receiver. On receipt the kernel adds the
+  sender's badge and, for a call, a reply handle. Messages are copied
+  through the kernel rather than passed in registers; registers could come
+  later as a fast path if copying shows up as a cost. Bulk data will go
+  through shared memory that one side maps for the other.
+- **Rendezvous.** Whichever side arrives first waits in the endpoint's
+  queue (senders and receivers each in arrival order). Messages pass
+  between threads in kernel form; each thread copies to and from its own
+  memory and installs handles in its own table.
+- **When one side is gone.** An endpoint counts the handles that can send
+  to it and receive from it. When the last of either kind closes, the other
+  side is woken with `PeerGone`, and later attempts fail at once, as when
+  one end of a Rust channel is dropped. A reply handle dropped unanswered,
+  even by a server that exits, fails the call with `PeerGone` too.
+- **Moving handles** needs the `TRANSFER` right. A handle in a message that
+  isn't delivered is closed.
+
+Known gaps, for later: no timeouts or non-blocking variants; a thread
+waiting on IPC can't be interrupted (there is no way to stop a process
+yet); and an endpoint can be kept alive by a cycle, such as a message
+queued on an endpoint that carries a handle to that same endpoint's
+receiving side.
 
 ## Access control: capabilities
 
@@ -76,6 +103,22 @@ refers to a kernel object and carries **rights**; system calls name the
 handle they act on, and holding the handle is the permission. The kernel
 owns the table, so handles can't be forged. Handles can be passed in IPC
 messages, and duplicated with the same or fewer rights, never more.
+
+Handle numbers are never reused within a process, so a stale number can't
+name a newer object, and closing a handle twice is harmless. A process may
+hold up to 1024. The rights so far (`pios_abi::rights`):
+
+| Right | Allows | Held by |
+| --- | --- | --- |
+| `SEND` | send and call | endpoint handles |
+| `RECEIVE` | receive | endpoint handles |
+| `DUPLICATE` | making copies (with the same or fewer rights) | endpoint handles |
+| `TRANSFER` | passing the handle on, in a message or to `spawn` | endpoint, process and reply handles |
+| `WAIT` | waiting for the process to end | process handles |
+
+`endpoint()` returns a handle with the first four. `spawn` can give the new
+process one handle, which is how a parent sets up the first channel to a
+child.
 
 Kernel objects:
 
@@ -127,8 +170,14 @@ and `libpios` both use.
 | 3 | `spawn(ptr, len, arg) -> handle` |
 | 4 | `wait(handle) -> exit status` |
 | 5 | `close(handle)` |
+| 6 | `endpoint() -> handle` |
+| 7 | `duplicate(handle, rights, badge) -> handle` |
+| 8 | `send(endpoint, message)` |
+| 9 | `call(endpoint, message)`: the reply replaces the message |
+| 10 | `receive(endpoint, message)` |
+| 11 | `reply(reply, message)` |
 
-IPC calls (send, receive, call, reply) and more handle management come next.
+The details of each are in the `pios-abi` crate.
 
 Every pointer argument is checked with the MMU, from the calling program's
 point of view, before the kernel touches the memory.
@@ -212,7 +261,8 @@ for now).
 4. ~~Threads, context switching (including FP/SIMD state), preemptive scheduling~~
 5. ~~Boot image; the kernel starts `init`, which starts the rest (was:
    initramfs; see [Decisions](#decisions))~~
-6. IPC and capabilities
+6. ~~IPC and capabilities~~ (endpoints, replies and process handles so
+   far; memory and interrupt handles come with step 7)
 7. User-space console server (device memory and interrupt handles)
 8. Process manager and the shell
 

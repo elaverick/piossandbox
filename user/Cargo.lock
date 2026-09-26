@@ -32,6 +32,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ipctest"
+version = "0.1.0"
+dependencies = [
+ "libpios",
+ "pios-abi",
+ "pios-bootfs",
+]
+
+[[package]]
 name = "libpios"
 version = "0.1.0"
 dependencies = [

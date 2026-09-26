@@ -23,15 +23,26 @@ use core::fmt;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use pios_abi::call;
-pub use pios_abi::{Error, ExitStatus};
+pub use pios_abi::{Error, ExitStatus, MESSAGE_WORDS, rights};
+
+mod ipc;
+use ipc::close_raw;
+pub use ipc::{Handle, Message, Received, Reply, endpoint};
 
 /// Make a system call with up to three arguments.
 fn syscall(number: usize, a0: usize, a1: usize, a2: usize) -> Result<usize, Error> {
+    syscall4(number, [a0, a1, a2, 0])
+}
+
+/// Make a system call with up to four arguments.
+fn syscall4(number: usize, args: [usize; 4]) -> Result<usize, Error> {
     let result: usize;
-    // SAFETY: `svc` enters the kernel, which only changes x0 and checks
-    // any pointers it is given.
+    // SAFETY: `svc` enters the kernel, which only changes x0, and checks
+    // any pointers it is given. (It may write through them, which the
+    // compiler allows for, as this isn't marked `nomem`.)
     unsafe {
-        core::arch::asm!("svc #0", in("x8") number, inout("x0") a0 => result, in("x1") a1, in("x2") a2,
+        core::arch::asm!("svc #0", in("x8") number, inout("x0") args[0] => result,
+                         in("x1") args[1], in("x2") args[2], in("x3") args[3],
                          options(nostack));
     }
     Error::from_result(result)
@@ -83,46 +94,54 @@ pub fn argument() -> usize {
     ARGUMENT.load(Ordering::Relaxed)
 }
 
+/// The handle this program was started with, if any (only the first call
+/// gets it).
+pub fn start_handle() -> Option<Handle> {
+    match START_HANDLE.swap(0, Ordering::Relaxed) {
+        0 => None,
+        raw => Some(Handle::from_raw(raw)),
+    }
+}
+
 static ARGUMENT: AtomicUsize = AtomicUsize::new(0);
+static START_HANDLE: AtomicUsize = AtomicUsize::new(0);
 
 #[doc(hidden)]
-pub fn _set_argument(arg: usize) {
+pub fn _set_arguments(arg: usize, handle: usize) {
     ARGUMENT.store(arg, Ordering::Relaxed);
+    START_HANDLE.store(handle, Ordering::Relaxed);
 }
 
 /// A process this one started. Dropping it gives up the handle (the child
 /// carries on); [`Child::wait`] waits for it to end.
 pub struct Child {
-    handle: usize,
+    handle: Handle,
 }
 
 impl Child {
-    /// The raw handle number.
-    pub fn handle(&self) -> usize {
-        self.handle
-    }
-
     /// Wait for the child to end, and say how.
     pub fn wait(self) -> Result<ExitStatus, Error> {
-        let handle = self.handle;
         // `wait` closes the handle itself.
-        core::mem::forget(self);
-        let raw = syscall(call::WAIT, handle, 0, 0)?;
+        let raw = syscall(call::WAIT, self.handle.into_raw(), 0, 0)?;
         ExitStatus::from_raw(raw).ok_or(Error::InvalidArgument)
     }
 }
 
-impl Drop for Child {
-    fn drop(&mut self) {
-        let _ = syscall(call::CLOSE, self.handle, 0, 0);
-    }
-}
-
 /// Start a new process running the ELF executable `image`, with `arg` as
-/// its argument.
-pub fn spawn(image: &[u8], arg: usize) -> Result<Child, Error> {
-    let handle = syscall(call::SPAWN, image.as_ptr() as usize, image.len(), arg)?;
-    Ok(Child { handle })
+/// its argument and giving it `handle`, if any (which needs the `TRANSFER`
+/// right, and is gone either way).
+pub fn spawn(image: &[u8], arg: usize, handle: Option<Handle>) -> Result<Child, Error> {
+    let handle = handle.map_or(0, Handle::into_raw);
+    let result = syscall4(
+        call::SPAWN,
+        [image.as_ptr() as usize, image.len(), arg, handle],
+    );
+    if result.is_err() {
+        close_raw(handle);
+    }
+    Ok(Child {
+        handle: Handle::from_raw(result?),
+    })
 }
 
 /// Make a raw system call, for testing the kernel's argument checking.
@@ -157,16 +176,16 @@ macro_rules! println {
     ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
 }
 
-/// Define the program's entry point: `_start` records its argument (for
-/// [`argument`]), calls `$main` (a `fn() -> i32`) and exits with what it
+/// Define the program's entry point: `_start` records its arguments (for
+/// [`argument`] and [`start_handle`]), calls `$main` (a `fn() -> i32`) and exits with what it
 /// returns.
 #[macro_export]
 macro_rules! pios_main {
     ($main:path) => {
         #[unsafe(no_mangle)]
         #[unsafe(link_section = ".text._start")]
-        pub extern "C" fn _start(arg: usize) -> ! {
-            $crate::_set_argument(arg);
+        pub extern "C" fn _start(arg: usize, handle: usize) -> ! {
+            $crate::_set_arguments(arg, handle);
             let main: fn() -> i32 = $main;
             $crate::exit(main())
         }

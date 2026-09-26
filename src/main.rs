@@ -39,6 +39,7 @@ mod gic;
 mod gpio;
 mod handle;
 mod heap;
+mod ipc;
 mod irq;
 mod mailbox;
 mod memory;
@@ -207,7 +208,7 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     );
     match self_test {
         Ok(()) => println!(
-            "  self-test       : svc, brk, timer interrupts, MMU, atomics, heap, address spaces, user mode and threads OK"
+            "  self-test       : svc, brk, timer interrupts, MMU, atomics, heap, address spaces, user mode, threads and IPC OK"
         ),
         Err(e) => println!("  self-test       : FAILED: {}", e),
     }
@@ -244,7 +245,7 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
 
     // Start the system: `init`, from the boot image, starts the rest.
     println!();
-    match process::spawn_init().map(thread::JoinHandle::join) {
+    match process::spawn_from_boot_image("init").map(thread::JoinHandle::join) {
         Ok(process::Exit::Code(code)) => println!("[init exited with code {}]", code),
         Ok(process::Exit::Fault(fault)) => println!("[init was stopped: {}]", fault),
         Err(e) => println!("[init could not be started: {}]", e),

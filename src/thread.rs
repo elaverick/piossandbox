@@ -383,20 +383,26 @@ pub fn spawn(
 }
 
 /// Start a user thread in `process`, entering user mode at `entry` with its
-/// stack pointer at `stack` and `arg` in x0.
+/// stack pointer at `stack` and `args` in x0 and x1.
 pub fn spawn_user(
     name: &'static str,
     process: Arc<Process>,
     entry: usize,
     stack: usize,
-    arg: usize,
+    args: [usize; 2],
 ) -> Result<JoinHandle, OutOfMemory> {
     let kernel_stack = KernelStack::new().ok_or(OutOfMemory)?;
     let frame = (kernel_stack.top() - size_of::<TrapFrame>()) as *mut TrapFrame;
     // SAFETY: the frame fits at the top of the new stack, which is mapped,
     // aligned (the stack top is page-aligned and the frame's size a
     // multiple of 16) and ours alone.
-    unsafe { frame.write(TrapFrame::new_user(entry as u64, stack as u64, arg as u64)) };
+    unsafe {
+        frame.write(TrapFrame::new_user(
+            entry as u64,
+            stack as u64,
+            args.map(|a| a as u64),
+        ))
+    };
     let context = Context::new(user_thread_start, 0, frame as usize, kernel_stack.bottom());
     let tables = process.space().root();
     Ok(with_scheduler(|s| {

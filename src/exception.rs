@@ -28,11 +28,11 @@ const _: () = assert!(core::mem::size_of::<TrapFrame>() == 288);
 
 impl TrapFrame {
     /// The frame that starts a user thread: returning from it enters EL0 at
-    /// `entry`, with interrupts enabled, the stack pointer at `stack`, `arg`
-    /// in x0 and every other register zero.
-    pub fn new_user(entry: u64, stack: u64, arg: u64) -> TrapFrame {
+    /// `entry`, with interrupts enabled, the stack pointer at `stack`,
+    /// `args` in x0 and x1 and every other register zero.
+    pub fn new_user(entry: u64, stack: u64, args: [u64; 2]) -> TrapFrame {
         let mut x = [0; 31];
-        x[0] = arg;
+        x[..2].copy_from_slice(&args);
         TrapFrame {
             x,
             elr: entry,
