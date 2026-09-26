@@ -24,13 +24,81 @@ const TIMEOUT_US: u64 = 100_000;
 pub const TAG_GET_BOARD_REVISION: u32 = 0x0001_0002;
 pub const TAG_GET_ARM_MEMORY: u32 = 0x0001_0005;
 pub const TAG_SET_CLOCK_RATE: u32 = 0x0003_8002;
+pub const TAG_ALLOCATE_BUFFER: u32 = 0x0004_0001;
+pub const TAG_GET_DISPLAY_SIZE: u32 = 0x0004_0003;
+pub const TAG_GET_PITCH: u32 = 0x0004_0008;
+pub const TAG_SET_PHYSICAL_SIZE: u32 = 0x0004_8003;
+pub const TAG_SET_VIRTUAL_SIZE: u32 = 0x0004_8004;
+pub const TAG_SET_DEPTH: u32 = 0x0004_8005;
+pub const TAG_SET_VIRTUAL_OFFSET: u32 = 0x0004_8009;
 
 pub const CLOCK_UART: u32 = 2;
 
-/// A property message buffer. The mailbox only carries the upper 28 bits of
-/// the address, so the buffer must be 16-byte aligned.
+/// A property message holding one or more tags, built up with `tag` and sent
+/// with `Mailbox::send`. The mailbox only carries the upper 28 bits of the
+/// buffer's address, so it must be 16-byte aligned.
 #[repr(C, align(16))]
-struct Message<const N: usize>([u32; N]);
+pub struct Message {
+    words: [u32; MESSAGE_WORDS],
+    len: usize,
+}
+
+/// Room for the largest message this kernel sends (framebuffer setup).
+const MESSAGE_WORDS: usize = 48;
+
+/// Identifies a tag within a `Message`, to read its response values.
+#[derive(Clone, Copy)]
+pub struct TagRef {
+    /// Index of the tag's first value word.
+    values: usize,
+}
+
+impl Message {
+    pub const fn new() -> Self {
+        // Words 0 and 1 are the header (total size, request code), filled in
+        // by `Mailbox::send`.
+        Message {
+            words: [0; MESSAGE_WORDS],
+            len: 2,
+        }
+    }
+
+    /// Append a tag with the given request values and room for `resp_words`
+    /// response values. Panics if the message is full.
+    pub fn tag(&mut self, tag: u32, request: &[u32], resp_words: usize) -> TagRef {
+        let words = request.len().max(resp_words);
+        // Tag header (id, value buffer size, request code) + values, and
+        // leave room for the end tag.
+        assert!(
+            self.len + 3 + words < MESSAGE_WORDS,
+            "mailbox message too long"
+        );
+        self.words[self.len] = tag;
+        self.words[self.len + 1] = (words * 4) as u32;
+        self.words[self.len + 2] = REQUEST;
+        let values = self.len + 3;
+        self.words[values..values + request.len()].copy_from_slice(request);
+        self.len = values + words;
+        TagRef { values }
+    }
+
+    /// Did the firmware answer this tag?
+    pub fn answered(&self, tag: TagRef) -> bool {
+        self.read(tag.values - 1) & (1 << 31) != 0
+    }
+
+    /// Response value `index` of `tag`.
+    pub fn value(&self, tag: TagRef, index: usize) -> u32 {
+        self.read(tag.values + index)
+    }
+
+    /// The GPU writes the reply behind the compiler's back, so read it with
+    /// volatile loads.
+    fn read(&self, index: usize) -> u32 {
+        // SAFETY: the reference is valid and `index` is bounds-checked.
+        unsafe { core::ptr::read_volatile(&self.words[index]) }
+    }
+}
 
 /// The mailbox at `base`.
 #[derive(Clone, Copy)]
@@ -49,40 +117,28 @@ impl Mailbox {
     /// values. Returns `None` if the firmware rejected the request or did not
     /// answer in time.
     pub fn property<const N: usize>(&self, tag: u32, values: &mut [u32; N]) -> Option<()> {
-        // Header (size, code) + tag header (id, buffer size, req/resp code)
-        // + values + end tag. We use a fixed-size buffer big enough for any
-        // tag this kernel sends.
-        const MAX_VALUES: usize = 8;
-        assert!(N <= MAX_VALUES);
-        let len = 2 + 3 + N + 1;
-        let mut msg = Message([0u32; 2 + 3 + MAX_VALUES + 1]);
-
-        msg.0[0] = (len * 4) as u32;
-        msg.0[1] = REQUEST;
-        msg.0[2] = tag;
-        msg.0[3] = (N * 4) as u32;
-        msg.0[4] = 0;
-        msg.0[5..5 + N].copy_from_slice(values);
-        msg.0[5 + N] = TAG_END;
-
-        let ptr = msg.0.as_mut_ptr();
-        self.call(CHANNEL_PROPERTY, ptr as usize)?;
-
-        // The GPU wrote the reply behind the compiler's back, so read it back
-        // with volatile loads.
-        // SAFETY: `ptr` points into `msg`, which is still alive, and every
-        // index is within the buffer.
-        unsafe {
-            let code = ptr.add(1).read_volatile();
-            let tag_code = ptr.add(4).read_volatile();
-            if code != RESPONSE_SUCCESS || tag_code & (1 << 31) == 0 {
-                return None;
-            }
-            for (i, v) in values.iter_mut().enumerate() {
-                *v = ptr.add(5 + i).read_volatile();
-            }
+        let mut msg = Message::new();
+        let t = msg.tag(tag, values, N);
+        self.send(&mut msg)?;
+        if !msg.answered(t) {
+            return None;
+        }
+        for (i, v) in values.iter_mut().enumerate() {
+            *v = msg.value(t, i);
         }
         Some(())
+    }
+
+    /// Send a message and wait for the reply. Returns `None` if the firmware
+    /// did not answer in time or reported an error; check individual tags
+    /// with `Message::answered`.
+    pub fn send(&self, msg: &mut Message) -> Option<()> {
+        msg.words[msg.len] = TAG_END;
+        msg.words[0] = ((msg.len + 1) * 4) as u32;
+        msg.words[1] = REQUEST;
+
+        self.call(CHANNEL_PROPERTY, msg.words.as_mut_ptr() as usize)?;
+        (msg.read(1) == RESPONSE_SUCCESS).then_some(())
     }
 
     /// Post a message address to `channel` and wait for the firmware to reply.

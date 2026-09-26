@@ -13,6 +13,8 @@ mod board;
 mod console;
 mod cpu;
 mod exception;
+mod font;
+mod framebuffer;
 mod gpio;
 mod mailbox;
 mod mmio;
@@ -41,6 +43,8 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     let Some(model) = Model::detect() else { halt() };
 
     let uarts = board::init_console(model);
+    let mailbox = model.mailbox();
+    let display = framebuffer::init(mailbox);
 
     println!();
     println!("Hello, world!");
@@ -82,7 +86,17 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
         }
     }
 
-    let mailbox = model.mailbox();
+    match &display {
+        Some(d) => println!(
+            "  display         : {}x{} framebuffer at {:#010x}, {}x{} characters",
+            d.fb.width(),
+            d.fb.height(),
+            d.fb.base(),
+            d.columns,
+            d.rows
+        ),
+        None => println!("  display         : none (the firmware did not provide a framebuffer)"),
+    }
     let mut revision = [0u32; 1];
     match mailbox.property(mailbox::TAG_GET_BOARD_REVISION, &mut revision) {
         Some(()) => println!("  board revision  : {:#08x}", revision[0]),
@@ -107,6 +121,8 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     loop {
         match console::getc() {
             b'\r' | b'\n' => console::puts("\n"),
+            // Backspace or Delete: step back, blank the character, step back.
+            0x08 | 0x7F => console::puts("\x08 \x08"),
             c => console::putc(c),
         }
     }

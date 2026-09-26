@@ -1,5 +1,6 @@
-//! The system console: output goes to every registered UART, and input is
-//! taken from whichever one has a byte waiting.
+//! The system console: output goes to every registered UART and to the
+//! display (if there is one), and input is taken from whichever UART has a
+//! byte waiting.
 
 use core::fmt;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -31,11 +32,12 @@ fn uarts() -> impl Iterator<Item = Pl011> {
         .map(Pl011::new)
 }
 
-/// Send one byte to every console UART.
+/// Send one byte to every console UART and the display.
 pub fn putc(byte: u8) {
     for uart in uarts() {
         uart.putc(byte);
     }
+    crate::framebuffer::putc(byte);
 }
 
 /// Send a string, translating `\n` into `\r\n` for serial terminals.

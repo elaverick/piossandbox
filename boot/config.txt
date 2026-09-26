@@ -1,10 +1,12 @@
 # Raspberry Pi 4 and 5 firmware configuration for pios.
 # See https://www.raspberrypi.com/documentation/computers/config_txt.html
 
-# Start the ARM cores in 64-bit mode and load our kernel at 0x80000. (The
-# Pi 5 would otherwise look for kernel_2712.img first.)
+# Start the ARM cores in 64-bit mode and load our kernel at 0x80000, the
+# address it is linked for. (The Pi 5 would otherwise look for
+# kernel_2712.img first.)
 arm_64bit=1
 kernel=kernel8.img
+kernel_address=0x80000
 
 # Keep the UART clocks stable. On the Pi 4, pios reconfigures GPIO 14/15 for
 # UART0 (PL011) itself, so no device tree overlay is needed.
@@ -18,6 +20,12 @@ enable_rp1_uart=1
 pciex4_reset=0
 
 [all]
+# pios draws its console on the firmware's framebuffer, which appears on
+# HDMI0 (the port next to the power connector). Connect the display before
+# powering on. If there is no picture, uncomment this to make the firmware
+# drive HDMI even when it can't detect a display.
+#hdmi_force_hotplug=1
+
 # Uncomment to see the firmware's own boot log before pios takes over: on
 # GPIO 14/15 on a Pi 4, on the debug UART connector on a Pi 5. Useful if
 # nothing appears on the serial port.
