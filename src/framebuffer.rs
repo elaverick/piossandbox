@@ -10,6 +10,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::font;
 use crate::mailbox::{self, Mailbox, Message};
+use crate::mmu;
 
 /// The largest display we support (4K).
 const MAX_WIDTH: usize = 4096;
@@ -99,7 +100,13 @@ impl FrameBuffer {
             && (1..=MAX_HEIGHT).contains(&fb.height)
             && fb.pitch >= fb.width * 4
             && buffer_size >= fb.pitch * fb.height;
-        valid.then_some(fb)
+        if !valid {
+            return None;
+        }
+        // The GPU scans the framebuffer out of memory, so it mustn't be
+        // cached: map it non-cacheable (writes may still be combined, which
+        // is what makes this fast).
+        mmu::map_non_cacheable(fb.base, buffer_size).then_some(fb)
     }
 
     pub fn width(&self) -> usize {
@@ -137,10 +144,10 @@ const MAX_ROWS: usize = MAX_HEIGHT / font::HEIGHT;
 
 /// A text console on a framebuffer.
 ///
-/// A copy of the characters on screen is kept in `grid`, so that scrolling
-/// only redraws the cells whose character changes. Until the MMU and caches
-/// are on, framebuffer memory is slow to access, and most of a text screen
-/// is blank.
+/// A copy of the characters on screen is kept in `grid`, so that nothing
+/// ever reads the framebuffer back (it isn't cached, so reads are slow) and
+/// scrolling only redraws the cells whose character changes: most of a text
+/// screen is blank.
 struct TextConsole {
     fb: FrameBuffer,
     /// Each font pixel is drawn as a `scale` x `scale` square.
@@ -300,12 +307,9 @@ impl<T> Shared<T> {
     }
 
     fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> Option<R> {
-        // Plain loads and stores only: see console.rs on atomics with the MMU
-        // off.
-        if self.busy.load(Ordering::Acquire) {
+        if self.busy.swap(true, Ordering::Acquire) {
             return None;
         }
-        self.busy.store(true, Ordering::Release);
         // SAFETY: `busy` guarantees this is the only live reference.
         let result = f(unsafe { &mut *self.value.get() });
         self.busy.store(false, Ordering::Release);

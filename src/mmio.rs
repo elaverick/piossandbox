@@ -4,7 +4,7 @@
 #[inline(always)]
 pub fn write(addr: usize, value: u32) {
     // SAFETY: callers only pass addresses of device registers that exist on
-    // the board we detected. The MMU is off, so they are always mapped.
+    // the board we detected, all mapped as Device memory (see mmu.rs).
     unsafe { core::ptr::write_volatile(addr as *mut u32, value) }
 }
 

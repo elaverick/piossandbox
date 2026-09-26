@@ -1,6 +1,7 @@
 //! VideoCore mailbox "property" interface, used to ask the GPU firmware for
 //! information and to change settings such as clock rates.
 
+use crate::cache;
 use crate::mmio;
 use crate::timer::Deadline;
 
@@ -36,16 +37,23 @@ pub const TAG_SET_VIRTUAL_OFFSET: u32 = 0x0004_8009;
 pub const CLOCK_UART: u32 = 2;
 
 /// A property message holding one or more tags, built up with `tag` and sent
-/// with `Mailbox::send`. The mailbox only carries the upper 28 bits of the
-/// buffer's address, so it must be 16-byte aligned.
-#[repr(C, align(16))]
+/// with `Mailbox::send`.
+///
+/// The mailbox only carries the upper 28 bits of the buffer's address, so it
+/// must be 16-byte aligned. It is 64-byte aligned, and `words` a multiple of
+/// 64 bytes, so that the words sit on cache lines of their own: the GPU
+/// reads and writes them in memory, behind the CPU's caches, and we clean
+/// and invalidate those lines around each call.
+#[repr(C, align(64))]
 pub struct Message {
     words: [u32; MESSAGE_WORDS],
     len: usize,
 }
 
-/// Room for the largest message this kernel sends (framebuffer setup).
+/// Room for the largest message this kernel sends (framebuffer setup): 192
+/// bytes, three 64-byte cache lines.
 const MESSAGE_WORDS: usize = 48;
+const _: () = assert!((MESSAGE_WORDS * 4).is_multiple_of(64));
 
 /// Identifies a tag within a `Message`, to read its response values.
 #[derive(Clone, Copy)]
@@ -138,7 +146,15 @@ impl Mailbox {
         msg.words[0] = ((msg.len + 1) * 4) as u32;
         msg.words[1] = REQUEST;
 
-        self.call(CHANNEL_PROPERTY, msg.words.as_mut_ptr() as usize)?;
+        let addr = msg.words.as_mut_ptr() as usize;
+        let len = core::mem::size_of_val(&msg.words);
+        // Make the request visible to the GPU, which reads memory directly...
+        cache::clean(addr, len);
+        let answered = self.call(CHANNEL_PROPERTY, addr);
+        // ...and drop our cached copy so we read the GPU's reply. (The lines
+        // hold nothing else, see `Message`.)
+        cache::invalidate(addr, len);
+        answered?;
         (msg.read(1) == RESPONSE_SUCCESS).then_some(())
     }
 
@@ -149,9 +165,8 @@ impl Mailbox {
         let value = (addr as u32 & !0xF) | (channel & 0xF);
         let deadline = Deadline::after_us(TIMEOUT_US);
 
-        // Make sure the message has actually reached memory before the GPU
-        // looks at it. The data cache is off so no cache maintenance is
-        // needed yet.
+        // Make sure the message has reached memory before the GPU looks at it
+        // (the caller has already cleaned it from the cache).
         mmio::dsb();
 
         while mmio::read(self.base + MBOX_STATUS) & MBOX_FULL != 0 {

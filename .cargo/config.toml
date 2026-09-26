@@ -3,9 +3,9 @@ target = "aarch64-unknown-none-softfloat"
 
 [target.aarch64-unknown-none-softfloat]
 rustflags = [
-    # BCM2711 = 4x Cortex-A72.
+    # BCM2711 = 4x Cortex-A72. (The Pi 5's Cortex-A76 runs this code too.)
+    # This target never emits unaligned memory accesses (+strict-align is
+    # part of its default features), so code is also safe to run on Device
+    # memory or with the MMU off.
     "-C", "target-cpu=cortex-a72",
-    # The MMU is off, so all memory is treated as Device memory and any
-    # unaligned access faults. Stop LLVM from emitting unaligned loads/stores.
-    "-C", "target-feature=+strict-align",
 ]

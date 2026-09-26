@@ -67,12 +67,32 @@ fn fatal(frame: &TrapFrame, index: u64) -> ! {
     const KIND: [&str; 4] = ["synchronous", "IRQ", "FIQ", "SError"];
     const SOURCE: [&str; 4] = ["EL1 (SP_EL0)", "EL1", "EL0 (AArch64)", "EL0 (AArch32)"];
 
-    crate::println!(
+    crate::print!(
         "\n*** UNHANDLED EXCEPTION: {} exception from {}: {}",
         KIND[(index & 3) as usize],
         SOURCE[((index >> 2) & 3) as usize],
         exception_class(frame.esr),
     );
+    // For instruction and data aborts, say what kind of fault it was.
+    if matches!(frame.esr >> 26, 0x20 | 0x21 | 0x24 | 0x25) {
+        let status = frame.esr & 0x3F;
+        match status {
+            0b000000..=0b001111 => crate::print!(
+                " ({}, level {})",
+                [
+                    "address size fault",
+                    "translation fault",
+                    "access flag fault",
+                    "permission fault"
+                ][(status >> 2) as usize],
+                status & 3
+            ),
+            0b010000 => crate::print!(" (external abort)"),
+            0b100001 => crate::print!(" (alignment fault)"),
+            _ => crate::print!(" (fault status {:#x})", status),
+        }
+    }
+    crate::println!();
     crate::println!(
         "    ESR  {:#010x}   ELR {:#018x}   FAR {:#018x}   SPSR {:#010x}",
         frame.esr,

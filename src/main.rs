@@ -10,6 +10,7 @@
 #![allow(clippy::identity_op)]
 
 mod board;
+mod cache;
 mod console;
 mod cpu;
 mod exception;
@@ -20,6 +21,7 @@ mod gpio;
 mod irq;
 mod mailbox;
 mod mmio;
+mod mmu;
 mod timer;
 mod uart;
 
@@ -102,13 +104,16 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
         }
     }
     println!(
+        "  memory          : MMU and caches on; RAM write-back cached, framebuffer write-combining"
+    );
+    println!(
         "  interrupts      : GIC-400 at {:#x} ({} IDs), {} Hz timer tick",
         gicd,
         irq_lines,
         timer::TICK_HZ
     );
     match self_test {
-        Ok(()) => println!("  self-test       : svc, brk and timer interrupts OK"),
+        Ok(()) => println!("  self-test       : svc, brk, timer interrupts, MMU and atomics OK"),
         Err(e) => println!("  self-test       : FAILED: {}", e),
     }
 
@@ -189,6 +194,29 @@ fn self_test() -> Result<(), &'static str> {
     }
     if irq::unexpected() != 0 {
         return Err("unexpected interrupts arrived");
+    }
+
+    // With the MMU on, RAM is Normal memory, where unaligned accesses work
+    // (as Device memory, with the MMU off, they fault) and so do atomic
+    // read-modify-write instructions. The compiler never emits unaligned
+    // accesses for this target, so use one directly.
+    if !mmu::enabled() {
+        return Err("the MMU or caches are off");
+    }
+    let words = [0x1122_3344_5566_7788u64, 0x99AA_BBCC_DDEE_FF00];
+    let unaligned: u64;
+    // SAFETY: bytes 3..11 lie within `words`.
+    unsafe {
+        core::arch::asm!("ldr {}, [{}]", out(reg) unaligned, in(reg) (words.as_ptr() as *const u8).add(3),
+                         options(readonly, nostack))
+    };
+    if unaligned != 0xEEFF_0011_2233_4455 {
+        return Err("unaligned load from RAM returned the wrong value");
+    }
+    let counter = core::sync::atomic::AtomicU32::new(1);
+    let old = core::hint::black_box(&counter).fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    if old != 1 || counter.into_inner() != 2 {
+        return Err("atomic read-modify-write failed");
     }
     Ok(())
 }

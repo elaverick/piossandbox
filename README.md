@@ -29,6 +29,7 @@ the machine, and echoes back anything typed on the serial console.
 | `src/timer.rs` | ARM generic timer: timeouts and the 100 Hz tick |
 | `src/exception.rs` | Trap frames, `svc`/`brk` handling, register dumps for fatal exceptions |
 | `src/gic.rs`, `src/irq.rs` | GIC-400 interrupt controller and interrupt dispatch |
+| `src/mmu.rs`, `src/cache.rs` | The memory map (built in `boot.s`), remapping, cache maintenance |
 | `src/cpu.rs`, `src/mmio.rs` | CPU identification, volatile register access |
 | `linker.ld` | Places the kernel at 0x80000 with `_start` first, then `.bss` and a 64 KiB stack |
 | `boot/config.txt` | Firmware configuration for the SD card |
@@ -44,11 +45,6 @@ and `llvm-tools` are installed automatically from `rust-toolchain.toml`) and
 ```sh
 make            # -> kernel8.img
 ```
-
-The build prints one expected warning about `strict-align` being an unstable
-target feature. We use it deliberately: until the MMU is enabled all memory is
-treated as Device memory, where unaligned accesses fault, so the compiler must
-not generate them.
 
 ## Testing in QEMU
 
@@ -66,8 +62,9 @@ make test       # boot, type into UART0, and check the serial and HDMI output
 ```
 
 The serial test (`scripts/qemu-test.sh`) checks the banner (including that
-the kernel runs at EL1 and its exception/interrupt self-test passed), types a
-line, and pastes a 12 KB burst that must be echoed back intact.
+the kernel runs at EL1 and its exception, interrupt and MMU self-test
+passed), types a line, and pastes a 12 KB burst that must be echoed back
+intact.
 
 The HDMI test (`scripts/qemu-screen-test.sh`) types enough to make the
 screen scroll, takes a screenshot through the QEMU monitor, turns the pixels
@@ -138,8 +135,10 @@ multiple displays or hardware-accelerated graphics.)
 If the screen stays black, try uncommenting `hdmi_force_hotplug=1` in
 `config.txt`.
 
-Until the MMU and caches are enabled, framebuffer memory is uncached and
-slow to write, so scrolling redraws only the character cells that change.
+The framebuffer is mapped non-cacheable (the GPU reads it straight from
+memory) but write-combining, so drawing is fast while reading it back would be
+slow. pios keeps its own copy of the characters on screen, never reads the
+framebuffer, and redraws only the character cells that change when scrolling.
 
 ### Serial connections
 
@@ -189,7 +188,40 @@ Two interrupts are in use, on both boards:
   lost. On the Pi 5, RP1's UART0 is still polled: RP1's interrupts arrive as
   PCIe MSIs, which pios doesn't set up yet.
 
-SErrors (asynchronous aborts) are still masked.
+SErrors (asynchronous aborts) are still masked. For instruction and data
+aborts, the fatal-exception report also decodes the fault (translation fault
+and its table level, permission fault, alignment fault and so on).
+
+## Memory
+
+Before calling any Rust code, `boot.s` builds page tables and turns on the
+MMU and the instruction and data caches. The map is an identity map
+(virtual address = physical address), 39 bits wide:
+
+| Range | Mapped as | Contents |
+| --- | --- | --- |
+| 0 - 1 GiB | Normal, write-back cached | RAM, including the GPU's share |
+| 3 - 4 GiB | Device | Pi 4 peripherals and GIC |
+| 0x10_0000_0000 - 0x10_7FFF_FFFF | Device | Pi 5 PCIe controllers, peripherals and GIC |
+| 0x1F_0000_0000 - 0x1F_3FFF_FFFF | Device | Pi 5 RP1 (through PCIe) |
+
+Anything else is unmapped and faults. One table covers both boards; each
+simply never touches the other's device ranges. RAM above 1 GiB isn't mapped
+yet.
+
+Memory the GPU reads or writes directly needs care now that the CPU caches
+RAM:
+
+- **The framebuffer** is switched to Normal non-cacheable (write-combining)
+  once allocated.
+- **Mailbox messages** sit on cache lines of their own; they are cleaned to
+  memory before the GPU reads them and invalidated before we read the reply.
+
+With RAM mapped as Normal memory, unaligned accesses and atomic
+read-modify-write instructions work, and the boot self-test checks both.
+(The compiler still never emits unaligned accesses: strict alignment is part
+of this Rust target's defaults, which is also what made the code safe to run
+before the MMU was on.)
 
 ## Pi 4 vs Pi 5
 

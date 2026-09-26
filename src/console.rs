@@ -11,11 +11,8 @@ use crate::uart::Pl011;
 const MAX_UARTS: usize = 2;
 
 /// Base addresses of the console UARTs (0 marks an empty slot), and the
-/// interrupt ID of each (0 if it is polled instead).
-///
-/// Only plain atomic loads and stores are used: with the MMU off, memory is
-/// Device memory, where the exclusive-access instructions behind atomic
-/// read-modify-write operations are not guaranteed to work.
+/// interrupt ID of each (0 if it is polled instead). Only changed during
+/// setup, before interrupts are enabled.
 static UARTS: [AtomicUsize; MAX_UARTS] = [const { AtomicUsize::new(0) }; MAX_UARTS];
 static UART_IRQS: [AtomicU32; MAX_UARTS] = [const { AtomicU32::new(0) }; MAX_UARTS];
 

@@ -140,12 +140,117 @@ _start:
     b       .Lzero_bss
 
 .Lbss_done:
-    // Hand over to Rust: kernel_main(dtb).
+    bl      enable_mmu
+
+    // Hand over to Rust: kernel_main(dtb). All Rust code runs with the MMU
+    // and caches on.
     mov     x0, x19
     bl      kernel_main
 
     // kernel_main should never return, but if it does, halt this core.
     b       .Lpark
+
+// Page tables and MMU setup. The memory map is described in mmu.rs; keep
+// the two in step.
+
+// Memory attributes (MAIR_EL1 indices):
+//   0: Device-nGnRnE           peripherals
+//   1: Normal, write-back      RAM
+//   2: Normal, non-cacheable   the framebuffer (set up later by mmu.rs)
+.equ MAIR_VALUE,        0x44ff00
+// TCR_EL1: 39-bit addresses from TTBR0 (T0SZ = 25), 4 KiB granule, table
+// walks inner-shareable write-back, TTBR1 walks disabled, 40-bit physical
+// addresses.
+.equ TCR_VALUE,         0x200993519
+// Block descriptors: AF | attribute index | (shareability, execute-never).
+.equ NORMAL_BLOCK,      0x705
+.equ DEVICE_BLOCK,      0x60000000000401
+.equ TABLE,             0x3
+.equ SCTLR_M,           (1 << 0)            // MMU
+.equ SCTLR_C,           (1 << 2)            // data cache
+.equ SCTLR_I,           (1 << 12)           // instruction cache
+
+.section ".bss.page_tables", "aw", @nobits
+.balign 4096
+.global page_table_l1
+page_table_l1:
+    .skip 4096                              // 512 x 1 GiB
+.global page_table_l2
+page_table_l2:
+    .skip 4096                              // first GiB as 512 x 2 MiB
+
+.section ".text", "ax"
+
+// Build an identity map and turn on the MMU and caches. Must run at EL1
+// with the MMU off, after .bss is zeroed.
+enable_mmu:
+    ldr     x0, =page_table_l1
+    ldr     x1, =page_table_l2
+
+    // L1[0] -> L2: the first GiB, all RAM (including the GPU's share),
+    // write-back cacheable.
+    orr     x2, x1, #TABLE
+    str     x2, [x0]
+    mov     x2, #0
+    mov     x3, #NORMAL_BLOCK
+    mov     x4, #512
+1:  orr     x5, x2, x3
+    str     x5, [x1], #8
+    add     x2, x2, #0x200000
+    subs    x4, x4, #1
+    b.ne    1b
+
+    // Peripherals, as 1 GiB device blocks. One table serves both boards:
+    // mapping the other board's ranges does no harm as nothing touches them.
+    ldr     x3, =DEVICE_BLOCK
+    ldr     x2, =0xc0000000                 // Pi 4: 0xfc00_0000-0xffff_ffff
+    orr     x2, x2, x3
+    str     x2, [x0, #3 * 8]
+    ldr     x2, =0x1000000000               // Pi 5: PCIe controllers
+    orr     x2, x2, x3
+    str     x2, [x0, #64 * 8]
+    ldr     x2, =0x1040000000               // Pi 5: SoC peripherals, GIC
+    orr     x2, x2, x3
+    str     x2, [x0, #65 * 8]
+    ldr     x2, =0x1f00000000               // Pi 5: RP1, through PCIe
+    orr     x2, x2, x3
+    str     x2, [x0, #124 * 8]
+
+    // Everything so far was written with the data cache off, straight to
+    // memory. Discard any stale cache lines for the kernel's memory (left
+    // from before we were loaded) so they can't hide those writes once the
+    // cache is on.
+    mrs     x3, ctr_el0
+    ubfx    x3, x3, #16, #4                 // DminLine: log2(words per line)
+    mov     x4, #4
+    lsl     x4, x4, x3                      // bytes per line
+    sub     x5, x4, #1
+    ldr     x1, =__kernel_start
+    ldr     x2, =__kernel_end
+    bic     x1, x1, x5
+2:  dc      ivac, x1
+    add     x1, x1, x4
+    cmp     x1, x2
+    b.lo    2b
+    dsb     sy
+
+    ldr     x1, =MAIR_VALUE
+    msr     mair_el1, x1
+    ldr     x1, =TCR_VALUE
+    msr     tcr_el1, x1
+    msr     ttbr0_el1, x0
+    isb
+    tlbi    vmalle1
+    ic      iallu
+    dsb     nsh
+    isb
+
+    mrs     x1, sctlr_el1
+    mov     x2, #(SCTLR_M | SCTLR_C | SCTLR_I)
+    orr     x1, x1, x2
+    msr     sctlr_el1, x1
+    isb
+    ret
 
 // Exception vector table: 16 entries of 0x80 bytes, 2 KiB aligned.
 //
