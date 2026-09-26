@@ -47,8 +47,10 @@ mod paging;
 mod process;
 #[allow(dead_code)] // shared with the host tests, which use more of it
 mod ranges;
+mod stack;
 mod sync;
 mod syscall;
+mod thread;
 mod timer;
 mod uart;
 mod user;
@@ -109,10 +111,14 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     // Interrupts: the timer tick and interrupt-driven serial input.
     let (gicd, gicc) = model.gic();
     let irq_lines = irq::init(gicd, gicc);
-    irq::register(timer::TICK_IRQ, timer::handle_tick);
+    irq::register(timer::TICK_IRQ, on_tick);
     timer::start_tick();
     console::enable_interrupts();
     irq::enable();
+
+    // From here on this is a thread like any other, taking turns with the
+    // rest.
+    thread::init("kernel");
 
     let self_test = self_test();
 
@@ -179,9 +185,17 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
         Some((start, size)) => println!("  heap            : {} MiB at {:#x}", size >> 20, start),
         None => println!("  heap            : none (not enough free memory)"),
     }
+    let threads = thread::stats();
+    println!(
+        "  threads         : {}, round-robin with {} ms time slices; {} switches so far, {} preemptive",
+        threads.threads,
+        1000 / timer::TICK_HZ,
+        threads.switches,
+        threads.preemptions
+    );
     match self_test {
         Ok(()) => println!(
-            "  self-test       : svc, brk, timer interrupts, MMU, atomics, heap, address spaces and user mode OK"
+            "  self-test       : svc, brk, timer interrupts, MMU, atomics, heap, address spaces, user mode and threads OK"
         ),
         Err(e) => println!("  self-test       : FAILED: {}", e),
     }
@@ -294,15 +308,20 @@ fn self_test() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Load and run a user program, reporting how it ended.
+/// Run a user program and wait for it to finish, reporting how it ended.
 fn run_program(name: &'static str, image: &[u8]) {
-    match process::Process::load(name, image) {
-        Ok(program) => match program.run() {
-            process::Exit::Code(code) => println!("[{} exited with code {}]", program.name(), code),
-            process::Exit::Fault(fault) => println!("[{} was stopped: {}]", program.name(), fault),
-        },
+    match process::spawn(name, image, 0).map(thread::JoinHandle::join) {
+        Ok(process::Exit::Code(code)) => println!("[{} exited with code {}]", name, code),
+        Ok(process::Exit::Fault(fault)) => println!("[{} was stopped: {}]", name, fault),
         Err(e) => println!("[{} could not be loaded: {}]", name, e),
     }
+}
+
+/// The timer interrupt: count the tick, and end the running thread's time
+/// slice.
+fn on_tick() {
+    timer::handle_tick();
+    thread::tick();
 }
 
 /// The device tree the firmware left at `phys`, if there is a valid one

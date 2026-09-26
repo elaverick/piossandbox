@@ -15,6 +15,10 @@ pub fn handle(frame: &mut TrapFrame) {
     let result = match frame.x[8] as usize {
         call::DEBUG_WRITE => debug_write(args[0], args[1]),
         call::EXIT => crate::process::exit(args[0] as i32),
+        call::YIELD => {
+            crate::thread::yield_now();
+            Ok(0)
+        }
         _ => Err(Error::NoSuchCall),
     };
     frame.x[0] = match result {

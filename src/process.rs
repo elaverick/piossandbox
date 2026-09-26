@@ -1,44 +1,25 @@
 //! User programs: loading an ELF executable into a fresh address space and
-//! running it at EL0.
+//! starting a thread to run it at EL0.
 //!
-//! There is no scheduler yet: `Process::run` runs the program until it
-//! exits or faults, then returns to the kernel. A faulting program is
-//! stopped and reported; the kernel carries on.
+//! A process is an address space and, for now, exactly one thread. When the
+//! thread exits or faults, the process ends, and its memory is freed with
+//! the thread.
 
+use alloc::sync::Arc;
 use core::fmt;
-use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::addr::PAGE_SIZE;
 use crate::addrspace::{AddressSpace, USER_END, USER_START};
 use crate::cache;
 use crate::elf::{Elf, ElfError};
 use crate::exception::{KIND, Syndrome, TrapFrame};
-use crate::mmu;
 use crate::paging::{Access, MapError};
-use crate::sync::SpinLock;
+use crate::thread::{self, JoinHandle};
 
 /// The top of every program's stack; the page below the stack is left
 /// unmapped, so overflowing it faults.
 pub const STACK_TOP: usize = 0x40_0000_0000;
 pub const STACK_PAGES: usize = 16;
-
-unsafe extern "C" {
-    /// In boot.s: run user code from `entry` with its stack at `stack`,
-    /// until `return_to_kernel`.
-    fn run_user(entry: usize, stack: usize) -> u64;
-    /// In boot.s: make the current `run_user` call return `value`.
-    fn return_to_kernel(value: u64) -> !;
-}
-
-/// Set while a program runs, so `return_to_kernel` is only ever used with a
-/// `run_user` to return to.
-static RUNNING: AtomicBool = AtomicBool::new(false);
-
-/// Details of the last user fault, for `Process::run` to report.
-static LAST_FAULT: SpinLock<Option<Fault>> = SpinLock::new(None);
-
-/// `return_to_kernel` values: an exit code, or this bit for a fault.
-const FAULTED: u64 = 1 << 63;
 
 /// Why a program stopped.
 #[derive(Clone, Copy, Debug)]
@@ -81,6 +62,8 @@ impl fmt::Display for Fault {
 pub enum LoadError {
     Elf(ElfError),
     Map(MapError),
+    /// No memory for its thread.
+    NoThread,
 }
 
 impl fmt::Display for LoadError {
@@ -88,6 +71,7 @@ impl fmt::Display for LoadError {
         match self {
             LoadError::Elf(e) => write!(f, "not a valid program ({e:?})"),
             LoadError::Map(e) => write!(f, "could not set up its memory ({e:?})"),
+            LoadError::NoThread => write!(f, "no memory for its thread"),
         }
     }
 }
@@ -104,17 +88,16 @@ impl From<MapError> for LoadError {
     }
 }
 
-/// A user program, loaded and ready to run.
+/// A user program's process: its address space, shared by its thread(s).
 pub struct Process {
-    name: &'static str,
     space: AddressSpace,
-    entry: usize,
 }
 
 impl Process {
     /// Load the ELF executable `image` into a new address space: each
     /// segment with the permissions its flags ask for, plus a stack.
-    pub fn load(name: &'static str, image: &[u8]) -> Result<Process, LoadError> {
+    /// Returns the process and its entry point.
+    fn load(image: &[u8]) -> Result<(Process, usize), LoadError> {
         let elf = Elf::new(image, USER_START as u64, USER_END as u64)?;
         let mut space = AddressSpace::new()?;
         for segment in elf.segments() {
@@ -138,60 +121,37 @@ impl Process {
             STACK_PAGES,
             Access::USER_READ_WRITE,
         )?;
-        Ok(Process {
-            name,
-            space,
-            entry: elf.entry() as usize,
-        })
+        Ok((Process { space }, elf.entry() as usize))
     }
 
-    pub fn name(&self) -> &'static str {
-        self.name
+    pub fn space(&self) -> &AddressSpace {
+        &self.space
     }
+}
 
-    /// Run the program until it exits or faults.
-    pub fn run(&self) -> Exit {
-        assert!(
-            !RUNNING.swap(true, Ordering::Acquire),
-            "a program is already running"
-        );
-        self.space.activate();
-        // SAFETY: the program's address space is active with its code and
-        // stack mapped, and RUNNING guards the matching return_to_kernel.
-        let value = unsafe { run_user(self.entry, STACK_TOP) };
-        RUNNING.store(false, Ordering::Release);
-        mmu::set_user_tables(None);
-        if value & FAULTED != 0 {
-            Exit::Fault(LAST_FAULT.lock().take().expect("a fault was recorded"))
-        } else {
-            Exit::Code(value as u32 as i32)
-        }
-    }
+/// Load the ELF executable `image` as a new process and start running it,
+/// with `arg` as the argument to its entry point. Join the returned handle
+/// to wait for it to end.
+pub fn spawn(name: &'static str, image: &[u8], arg: usize) -> Result<JoinHandle, LoadError> {
+    let (process, entry) = Process::load(image)?;
+    thread::spawn_user(name, Arc::new(process), entry, STACK_TOP, arg)
+        .map_err(|_| LoadError::NoThread)
 }
 
 /// The running program asked to exit (from the `exit` system call).
 pub fn exit(code: i32) -> ! {
-    finish(code as u32 as u64)
+    thread::exit(Exit::Code(code))
 }
 
-/// The running program caused an exception other than a system call:
-/// record it and stop the program.
+/// The running program caused an exception other than a system call: stop
+/// it.
 pub fn user_fault(frame: &TrapFrame, index: u64) -> ! {
-    *LAST_FAULT.lock() = Some(Fault {
+    thread::exit(Exit::Fault(Fault {
         index,
         esr: frame.esr,
         far: frame.far,
         pc: frame.elr,
-    });
-    finish(FAULTED)
-}
-
-fn finish(value: u64) -> ! {
-    assert!(RUNNING.load(Ordering::Acquire), "no program is running");
-    // SAFETY: a program is running (checked above), so `run_user` is on the
-    // kernel stack to return to; this is only called from exception
-    // handlers holding no locks or other state that needs dropping.
-    unsafe { return_to_kernel(value) }
+    }))
 }
 
 /// The user programs built into the kernel (until there is an initramfs).
@@ -199,35 +159,66 @@ pub mod programs {
     pub static HELLO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello.elf"));
     pub static USERTEST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/usertest.elf"));
     pub static CRASHTEST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/crashtest.elf"));
+    pub static FPTEST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fptest.elf"));
 }
 
-/// Run the built-in test programs: `usertest` checks the system call
-/// interface from user space and must exit 0; `crashtest` reads kernel
-/// memory and must be stopped by a fault. Neither may leak memory.
+/// Run the built-in test programs, all at once so they take turns:
+///
+/// - `usertest` checks the system call interface from user space;
+/// - two `fptest`s each fill the FP/SIMD registers with their own values
+///   and check them while being switched in and out;
+/// - `crashtest` reads kernel memory and must be stopped by a fault.
+///
+/// None may leak memory or threads.
 pub fn self_test() -> Result<(), &'static str> {
-    let free_before = crate::memory::frame_stats().free;
-    let run = |name, image| {
-        Process::load(name, image)
-            .map(|p| p.run())
-            .map_err(|_| "a test program failed to load")
-    };
-    let ticks_before = crate::timer::tick_count();
-    match run("usertest", programs::USERTEST)? {
-        Exit::Code(0) => {}
-        _ => return Err("usertest failed"),
+    use crate::memory::frame_stats;
+    use crate::timer::tick_count;
+
+    let free_before = frame_stats().free;
+    let before = thread::stats();
+    let ticks_before = tick_count();
+    let start =
+        |name, image, arg| spawn(name, image, arg).map_err(|_| "a test program failed to load");
+    let usertest = start("usertest", programs::USERTEST, 0)?;
+    let fptests = [
+        start("fptest", programs::FPTEST, 1)?,
+        start("fptest", programs::FPTEST, 2)?,
+    ];
+    let crashtest = start("crashtest", programs::CRASHTEST, 0)?;
+
+    if !matches!(usertest.join(), Exit::Code(0)) {
+        return Err("usertest failed");
     }
-    // usertest computes for long enough that timer interrupts arrive while
-    // it runs at EL0; its result shows they didn't disturb it.
-    if crate::timer::tick_count() == ticks_before {
-        return Err("no timer interrupts arrived while usertest ran");
+    for fptest in fptests {
+        match fptest.join() {
+            Exit::Code(0) => {}
+            Exit::Code(_) => return Err("a thread's FP/SIMD registers were disturbed"),
+            Exit::Fault(_) => return Err("fptest faulted"),
+        }
     }
-    match run("crashtest", programs::CRASHTEST)? {
+    match crashtest.join() {
         Exit::Fault(fault)
             if Syndrome(fault.esr).is_data_abort() && fault.far == 0xFFFF_FF80_0008_0000 => {}
         _ => return Err("crashtest wasn't stopped when reading kernel memory"),
     }
-    if crate::memory::frame_stats().free != free_before {
+
+    // The programs compute for long enough that the timer tick preempts
+    // them, and the results show that didn't disturb them.
+    let after = thread::stats();
+    if tick_count() == ticks_before {
+        return Err("no timer interrupts arrived while the test programs ran");
+    }
+    if after.preemptions < before.preemptions + MIN_PREEMPTIONS {
+        return Err("the test programs weren't preempted");
+    }
+    if after.threads != before.threads {
+        return Err("finished threads weren't freed");
+    }
+    if frame_stats().free != free_before {
         return Err("user programs leaked memory");
     }
     Ok(())
 }
+
+/// How many times, at least, the test programs must be preempted.
+const MIN_PREEMPTIONS: u64 = 4;

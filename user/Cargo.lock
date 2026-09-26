@@ -10,6 +10,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fptest"
+version = "0.1.0"
+dependencies = [
+ "libpios",
+]
+
+[[package]]
 name = "hello"
 version = "0.1.0"
 dependencies = [

@@ -44,6 +44,24 @@ impl<T> SpinLock<T> {
             irq_state,
         }
     }
+
+    /// Take the lock if it is free, without waiting.
+    pub fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
+        let irq_state = irq::save_and_disable();
+        match self
+            .locked
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        {
+            Ok(_) => Some(SpinLockGuard {
+                lock: self,
+                irq_state,
+            }),
+            Err(_) => {
+                irq::restore(irq_state);
+                None
+            }
+        }
+    }
 }
 
 pub struct SpinLockGuard<'a, T> {

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// User programs embedded in the kernel; see src/process.rs.
-const PROGRAMS: &[&str] = &["hello", "usertest", "crashtest"];
+const PROGRAMS: &[&str] = &["hello", "usertest", "crashtest", "fptest"];
 
 fn main() {
     let dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());

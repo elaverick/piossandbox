@@ -10,8 +10,10 @@ use core::ops::{Add, Sub};
 /// space: physical address `p` is at virtual `KERNEL_BASE + p`.
 pub const KERNEL_BASE: usize = 0xFFFF_FF80_0000_0000;
 
-/// Physical addresses the linear map can cover (the kernel half is 39 bits).
-pub const LINEAR_MAP_SIZE: usize = 1 << 39;
+/// Physical addresses the linear map can cover: the lower half of the
+/// kernel half (256 GiB, well beyond the Pi's RAM and peripherals). The rest
+/// holds the thread stacks (see `stack.rs`).
+pub const LINEAR_MAP_SIZE: usize = 1 << 38;
 
 pub const PAGE_SIZE: usize = 4096;
 

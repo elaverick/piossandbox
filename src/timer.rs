@@ -54,12 +54,18 @@ pub fn tick_count() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }
 
+/// CNTKCTL_EL1: user programs may read the virtual counter (CNTVCT_EL0)
+/// and its frequency, as on Linux, but not use the timers.
+const CNTKCTL_EL0VCTEN: u64 = 1 << 1;
+
 /// Start the periodic tick. Register `handle_tick` for `TICK_IRQ` first.
 pub fn start_tick() {
     let interval = frequency() / TICK_HZ;
     TICK_INTERVAL.store(interval, Ordering::Relaxed);
-    // SAFETY: programming our own EL1 physical timer has no other effect.
+    // SAFETY: programming our own EL1 physical timer has no other effect;
+    // letting user programs read the time exposes nothing else.
     unsafe {
+        asm!("msr cntkctl_el1, {}", in(reg) CNTKCTL_EL0VCTEN, options(nomem, nostack));
         asm!("msr cntp_cval_el0, {}", in(reg) ticks() + interval, options(nomem, nostack));
         asm!("msr cntp_ctl_el0, {}", in(reg) 1u64, options(nomem, nostack)); // enabled, unmasked
     }

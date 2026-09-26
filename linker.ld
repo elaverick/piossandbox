@@ -46,8 +46,14 @@ SECTIONS
         __bss_end = .;
     }
 
-    /* The boot stack. */
-    .stack (NOLOAD) : ALIGN(16) {
+    /* The boot stack, with a guard page below it that mmu.rs leaves
+     * unmapped, so overflowing the stack faults instead of overwriting .bss.
+     */
+    . = ALIGN(4096);
+    __stack_guard = .;
+    .stack (NOLOAD) : ALIGN(4096) {
+        . += 4096;
+        __stack_bottom = .;
         . += 64K;
         __stack_top = .;
     }

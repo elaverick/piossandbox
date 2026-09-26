@@ -121,6 +121,11 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// The top-level page table, for TTBR0.
+    pub fn root(&self) -> PhysAddr {
+        self.table.root()
+    }
+
     /// Make this the current lower half.
     pub fn activate(&self) {
         mmu::set_user_tables(Some(self.table.root()));

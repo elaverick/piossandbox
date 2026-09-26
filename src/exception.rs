@@ -1,8 +1,11 @@
 //! Exception handling at EL1.
 //!
 //! The vector table in boot.s saves the interrupted state as a `TrapFrame`
-//! and calls `exception_handler`. When the handler returns, the (possibly
-//! modified) frame is restored and execution resumes at `frame.elr`.
+//! on the current thread's kernel stack and calls `exception_handler`. When
+//! the handler returns, the (possibly modified) frame is restored and
+//! execution resumes at `frame.elr`. The handler may switch threads first
+//! (on a timer tick, or when a program exits), in which case this thread's
+//! frame waits on its stack until the thread runs again.
 
 use core::fmt;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -17,10 +20,29 @@ pub struct TrapFrame {
     pub spsr: u64,
     pub esr: u64,
     pub far: u64,
-    _reserved: u64,
+    /// The user stack pointer (SP_EL0).
+    pub sp_el0: u64,
 }
 
 const _: () = assert!(core::mem::size_of::<TrapFrame>() == 288);
+
+impl TrapFrame {
+    /// The frame that starts a user thread: returning from it enters EL0 at
+    /// `entry`, with interrupts enabled, the stack pointer at `stack`, `arg`
+    /// in x0 and every other register zero.
+    pub fn new_user(entry: u64, stack: u64, arg: u64) -> TrapFrame {
+        let mut x = [0; 31];
+        x[0] = arg;
+        TrapFrame {
+            x,
+            elr: entry,
+            spsr: 0, // EL0t, nothing masked
+            esr: 0,
+            far: 0,
+            sp_el0: stack,
+        }
+    }
+}
 
 // The kind of exception: bits [1:0] of the vector index.
 const SYNCHRONOUS: u64 = 0;
@@ -46,12 +68,21 @@ extern "C" fn exception_handler(frame: &mut TrapFrame, index: u64) {
     let kind = index & 3;
     if kind == IRQ {
         crate::irq::handle();
+        // If this was the end of a time slice, switch threads now the
+        // interrupt is dealt with.
+        crate::thread::preempt_if_needed();
         return;
     }
     if index >> 2 >= FROM_USER {
         // From a user program: a system call, or a fault that ends it.
         if index >> 2 == FROM_USER && kind == SYNCHRONOUS && frame.esr >> 26 == EC_SVC64 {
+            // System calls can take a while (writing to a slow serial
+            // port), so let interrupts, and other threads, in meanwhile.
+            // The frame is safe on this thread's stack; returning from it
+            // needs interrupts masked again.
+            crate::irq::enable();
             crate::syscall::handle(frame);
+            crate::irq::disable();
         } else {
             crate::process::user_fault(frame, index);
         }
@@ -75,6 +106,20 @@ extern "C" fn exception_handler(frame: &mut TrapFrame, index: u64) {
     }
 }
 
+/// Called by boot.s, on a spare stack, when an exception from the kernel
+/// found the kernel stack full.
+#[unsafe(no_mangle)]
+extern "C" fn report_stack_overflow(elr: u64, far: u64, esr: u64) -> ! {
+    crate::println!(
+        "\n*** KERNEL STACK OVERFLOW in thread {}: {} at pc {:#x}, address {:#x}",
+        crate::thread::Running,
+        Syndrome(esr),
+        elr,
+        far
+    );
+    crate::halt()
+}
+
 pub const KIND: [&str; 4] = ["synchronous", "IRQ", "FIQ", "SError"];
 
 /// Report an exception we can't handle, with the full register state, and
@@ -83,17 +128,19 @@ fn fatal(frame: &TrapFrame, index: u64) -> ! {
     const SOURCE: [&str; 4] = ["EL1 (SP_EL0)", "EL1", "EL0 (AArch64)", "EL0 (AArch32)"];
 
     crate::println!(
-        "\n*** UNHANDLED EXCEPTION: {} exception from {}: {}",
+        "\n*** UNHANDLED EXCEPTION: {} exception from {} in thread {}: {}",
         KIND[(index & 3) as usize],
         SOURCE[((index >> 2) & 3) as usize],
+        crate::thread::Running,
         Syndrome(frame.esr),
     );
     crate::println!(
-        "    ESR  {:#010x}   ELR {:#018x}   FAR {:#018x}   SPSR {:#010x}",
+        "    ESR  {:#010x}   ELR {:#018x}   FAR {:#018x}   SPSR {:#010x}   SP_EL0 {:#x}",
         frame.esr,
         frame.elr,
         frame.far,
-        frame.spsr
+        frame.spsr,
+        frame.sp_el0
     );
     for row in 0..8 {
         crate::print!("   ");

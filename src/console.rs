@@ -6,6 +6,8 @@ use core::cell::UnsafeCell;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
+use crate::sync::SpinLock;
+use crate::thread::ThreadId;
 use crate::uart::Pl011;
 
 const MAX_UARTS: usize = 2;
@@ -68,7 +70,15 @@ fn uart_interrupt() {
             INPUT_PAUSED.store(true, Ordering::Release);
         }
     }
+    if !INPUT.is_empty()
+        && let Some(reader) = *READER.lock()
+    {
+        crate::thread::unpark(reader);
+    }
 }
+
+/// The thread waiting in `getc`, if any.
+static READER: SpinLock<Option<ThreadId>> = SpinLock::new(None);
 
 /// Undo `uart_interrupt` switching input off, once there is room again.
 fn resume_input() {
@@ -150,10 +160,14 @@ impl InputBuffer {
 
 /// Send one byte to every console UART and the display.
 pub fn putc(byte: u8) {
-    for uart in uarts() {
-        uart.putc(byte);
-    }
-    crate::framebuffer::putc(byte);
+    // Without interrupts, so another thread can't cut in half way (and the
+    // display, which refuses re-entry, doesn't miss its output).
+    crate::irq::without_interrupts(|| {
+        for uart in uarts() {
+            uart.putc(byte);
+        }
+        crate::framebuffer::putc(byte);
+    });
 }
 
 /// Send a string, translating `\n` into `\r\n` for serial terminals.
@@ -171,7 +185,8 @@ pub fn write_bytes(bytes: &[u8]) {
     }
 }
 
-/// Wait for a byte from any console UART.
+/// Wait for a byte from any console UART. Only one thread may call this at
+/// a time, and only once the scheduler is running.
 pub fn getc() -> u8 {
     loop {
         if let Some(byte) = INPUT.pop() {
@@ -181,7 +196,7 @@ pub fn getc() -> u8 {
         // Collect anything no interrupt was raised for. A UART only
         // interrupts on a change, so data that arrived before interrupts
         // were enabled, or while they were paused, could otherwise wait
-        // forever. This runs at least on every timer tick.
+        // forever.
         crate::irq::without_interrupts(uart_interrupt);
         if !INPUT.is_empty() {
             continue;
@@ -196,12 +211,17 @@ pub fn getc() -> u8 {
             }
         }
         if polled {
-            core::hint::spin_loop();
+            // Keep polling, but let any other thread run in between.
+            crate::thread::yield_now();
         } else {
-            // Everything is interrupt-driven: sleep until an interrupt (a
-            // key, or at worst the next timer tick).
-            // SAFETY: `wfi` just idles the core until an interrupt.
-            unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
+            // Everything is interrupt-driven: sleep until the interrupt
+            // handler has something for us. (If a byte arrives after the
+            // check above, `park` returns at once.)
+            *READER.lock() = Some(crate::thread::current());
+            if INPUT.is_empty() {
+                crate::thread::park();
+            }
+            *READER.lock() = None;
         }
     }
 }

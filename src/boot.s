@@ -298,92 +298,37 @@ switch_kernel_tables:
     isb
     ret
 
-// User mode.
-//
-// run_user(entry, stack) runs user code at EL0 from `entry` with the stack
-// pointer at `stack`, and returns only when the kernel calls
-// return_to_kernel(value), which makes run_user return `value`. That
-// happens from an exception handler (when the program exits or faults):
-// the handler's frames on the kernel stack are simply abandoned, so it must
-// hold nothing that needs dropping.
-//
-// While the program runs, exceptions from it arrive on the kernel stack
-// just below run_user's saved registers.
-
-.equ USER_SAVE_SIZE, 112
-
-.global run_user
-run_user:
-    // Save the callee-saved registers and the interrupt mask, and remember
-    // where they are.
-    sub     sp, sp, #USER_SAVE_SIZE
-    stp     x19, x20, [sp, #0]
-    stp     x21, x22, [sp, #16]
-    stp     x23, x24, [sp, #32]
-    stp     x25, x26, [sp, #48]
-    stp     x27, x28, [sp, #64]
-    stp     x29, x30, [sp, #80]
-    mrs     x2, daif
-    str     x2, [sp, #96]
-    adrp    x2, user_return_sp
-    mov     x3, sp
-    str     x3, [x2, :lo12:user_return_sp]
-
-    msr     sp_el0, x1
-    msr     elr_el1, x0
-    msr     spsr_el1, xzr               // EL0, interrupts enabled
-
-    // Start the program with every register cleared, so no kernel values
-    // leak into user space.
-    .irp n, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30
-    mov     x\n, xzr
-    .endr
-    // (The kernel itself never uses the FP/SIMD registers, but programs do.)
-    .arch_extension fp
-    .arch_extension simd
-    .irp n, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
-    movi    v\n\().2d, #0
-    .endr
-    msr     fpcr, xzr
-    msr     fpsr, xzr
-    eret
-
-.global return_to_kernel
-return_to_kernel:
-    adrp    x2, user_return_sp
-    ldr     x3, [x2, :lo12:user_return_sp]
-    mov     sp, x3
-    ldr     x2, [sp, #96]
-    msr     daif, x2
-    ldp     x19, x20, [sp, #0]
-    ldp     x21, x22, [sp, #16]
-    ldp     x23, x24, [sp, #32]
-    ldp     x25, x26, [sp, #48]
-    ldp     x27, x28, [sp, #64]
-    ldp     x29, x30, [sp, #80]
-    add     sp, sp, #USER_SAVE_SIZE
-    ret                                 // from run_user, with x0 = value
-
-.section ".bss", "aw", @nobits
-.balign 8
-user_return_sp:
-    .skip 8
-
-.section ".text", "ax"
-
 // Exception vector table: 16 entries of 0x80 bytes, 2 KiB aligned.
 //
-// Every entry saves the interrupted state in a trap frame on the stack
-// (x0-x30, ELR, SPSR, ESR, FAR; see `TrapFrame` in exception.rs), calls
-// `exception_handler(frame, index)`, then restores the (possibly modified)
-// frame and returns. `index` is the entry taken: bits [3:2] say where the
-// exception came from and bits [1:0] what kind it was.
+// Every entry saves the interrupted state in a trap frame on the current
+// thread's kernel stack (x0-x30, ELR, SPSR, ESR, FAR, SP_EL0; see
+// `TrapFrame` in exception.rs), calls `exception_handler(frame, index)`,
+// then restores the (possibly modified) frame and returns. `index` is the
+// entry taken: bits [3:2] say where the exception came from and bits [1:0]
+// what kind it was.
+//
+// An exception from user mode starts at the top of the thread's kernel
+// stack. One from the kernel pushes its frame below whatever the kernel was
+// doing, so those entries first check the frame fits above the stack's
+// limit (`current_stack_limit`, kept up to date by the context switch).
+// If it doesn't, the stack has overflowed (usually a fault on the unmapped
+// guard page below it) and pushing the frame would only fault again, so
+// report it from a spare stack instead. TPIDR_EL1 is scratch space for
+// this check, and nothing else uses it.
 
 .equ FRAME_SIZE, 288
 
 .macro VECTOR index
     .balign 0x80
     sub     sp, sp, #FRAME_SIZE
+.if (\index >> 2) == 1                  // from EL1, on its own stack
+    msr     tpidr_el1, x0
+    adrp    x0, current_stack_limit
+    ldr     x0, [x0, :lo12:current_stack_limit]
+    cmp     sp, x0
+    mrs     x0, tpidr_el1
+    b.lo    kernel_stack_overflow
+.endif
     stp     x0, x1, [sp, #0]
     mov     x0, #\index
     b       exception_entry
@@ -418,16 +363,23 @@ exception_entry:
     mrs     x2, esr_el1
     stp     x1, x2, [sp, #256]
     mrs     x1, far_el1
-    str     x1, [sp, #272]
+    mrs     x2, sp_el0
+    stp     x1, x2, [sp, #272]
 
     mov     x1, x0                      // index
     mov     x0, sp                      // frame
     bl      exception_handler
 
+// Return from an exception (or start a user thread) with sp pointing at its
+// trap frame, IRQs masked.
+.global exception_return
+exception_return:
     ldp     x30, x1, [sp, #240]
     msr     elr_el1, x1
-    ldr     x1, [sp, #256]
+    ldp     x1, x2, [sp, #256]
     msr     spsr_el1, x1
+    ldr     x1, [sp, #280]
+    msr     sp_el0, x1
     ldp     x28, x29, [sp, #224]
     ldp     x26, x27, [sp, #208]
     ldp     x24, x25, [sp, #192]
@@ -445,3 +397,27 @@ exception_entry:
     ldp     x0, x1, [sp, #0]
     add     sp, sp, #FRAME_SIZE
     eret
+
+// The kernel stack overflowed (see the vector table). Report it from the
+// overflow stack, as best we can, and stop.
+kernel_stack_overflow:
+    adrp    x0, overflow_stack_top
+    add     x0, x0, :lo12:overflow_stack_top
+    mov     sp, x0
+    mrs     x0, elr_el1
+    mrs     x1, far_el1
+    mrs     x2, esr_el1
+    bl      report_stack_overflow       // never returns
+
+.section ".data", "aw"
+.balign 8
+// The lowest address the current thread's kernel stack may use; the boot
+// stack's to start with.
+.global current_stack_limit
+current_stack_limit:
+    .quad   __stack_bottom
+
+.section ".bss", "aw", @nobits
+.balign 16
+    .skip   16384
+overflow_stack_top:

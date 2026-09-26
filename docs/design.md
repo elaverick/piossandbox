@@ -11,11 +11,12 @@ and the plan for getting there.
 Done: boot on the Raspberry Pi 4 and 5, serial and HDMI console, exceptions,
 GIC interrupts and a timer tick, MMU and caches, kernel heap, physical page
 allocator, higher-half kernel with W^X mappings, per-process address spaces,
-user mode with an ELF loader and the first system calls (one program at a
-time, built into the kernel image).
+user mode with an ELF loader and the first system calls, threads with
+preemptive round-robin scheduling (user programs are still built into the
+kernel image).
 
-Next: threads and scheduling, loading programs from an initramfs, IPC,
-capabilities, user-space drivers, the shell.
+Next: loading programs from an initramfs, IPC, capabilities, user-space
+drivers, the shell.
 
 ## Memory layout
 
@@ -25,7 +26,8 @@ Virtual addresses are 39 bits wide in each half of the address space
 | Range | Contents | Page table |
 | --- | --- | --- |
 | `0x0000_0000_0000_0000` - `0x0000_007F_FFFF_FFFF` | the running process (user space) | TTBR0, one per process |
-| `0xFFFF_FF80_0000_0000` - `0xFFFF_FFFF_FFFF_FFFF` | the kernel | TTBR1, shared |
+| `0xFFFF_FF80_0000_0000` - `0xFFFF_FFBF_FFFF_FFFF` | the kernel: linear map | TTBR1, shared |
+| `0xFFFF_FFC0_0000_0000` - `0xFFFF_FFFF_FFFF_FFFF` | the kernel: thread stacks | TTBR1, shared |
 
 The kernel half is a *linear map*: physical address `p` appears at
 `0xFFFF_FF80_0000_0000 + p`, so the kernel can reach any RAM or device by
@@ -37,6 +39,8 @@ map (`0xFFFF_FF80_0008_0000`, as the firmware loads it at physical
   executable, except the kernel's own image, which is mapped per section:
   code read-execute, constants read-only, data read-write.
 - Peripherals are Device memory; the framebuffer is Normal non-cacheable.
+- Each thread's kernel stack is mapped above the linear map, in a slot with
+  an unmapped guard below it.
 - Nothing else is mapped: stray accesses fault.
 
 User address spaces map only their own memory, never the kernel's, and
@@ -119,11 +123,37 @@ and `libpios` both use.
 | --- | --- |
 | 0 | `debug_write(ptr, len)`: write to the kernel console (temporary) |
 | 1 | `exit(code)` |
+| 2 | `yield()` |
 
 IPC calls (send, receive, call, reply) and handle management come next.
 
 Every pointer argument is checked with the MMU, from the calling program's
 point of view, before the kernel touches the memory.
+
+## Threads and scheduling
+
+A thread is the unit the scheduler runs: a kernel stack, a saved context
+and, for user threads, the process (address space) it runs in. Each process
+has one thread for now; a system call to start more will come with the
+process manager.
+
+- Scheduling is round-robin and preemptive: the 100 Hz timer tick ends each
+  time slice. When nothing is ready, an idle thread waits for interrupts.
+  Priorities can come later, if the servers need them.
+- Threads block with `park` and are woken with `unpark`, which remembers a
+  wakeup that arrives early (as Rust's `std::thread::park` does), so a
+  thread can check a condition, register itself and park without losing a
+  wakeup in between. IPC will block and wake threads the same way.
+- The context switch saves the callee-saved registers, stack pointer,
+  TPIDR_EL0, FPCR/FPSR and all FP/SIMD registers. Saving FP/SIMD state on
+  every switch is simple and cheap next to the TLB flush; switching it
+  lazily (trapping a thread's first FP use) can come later if it matters.
+- A thread that finishes is freed by the next thread to run, since its own
+  stack is in use until the switch.
+- Only one core runs for now. The scheduler's lock masks interrupts, and a
+  switch runs with interrupts masked, which on one core makes it atomic.
+  Using the other cores needs per-core run queues and current-thread state.
+- Without address space IDs, switching between processes flushes the TLB.
 
 ## User programs
 
@@ -131,8 +161,10 @@ Written in Rust, `no_std`, on a small runtime crate (`libpios`: entry point,
 system call wrappers, `print!`, panic handler; a heap will follow), and
 built as statically linked ELF executables linked at `0x40_0000`, with
 floating point. The kernel itself never uses the FP/SIMD registers, so a
-program's are preserved across system calls; the scheduler will have to
-save and restore them when switching threads. They reach the board in an initramfs: a
+program's are preserved across system calls, and the scheduler saves and
+restores them when switching threads. A program's entry point gets one
+argument in `x0`, and programs may read the system counter (`CNTVCT_EL0`)
+directly for the time. They reach the board in an initramfs: a
 cpio archive the firmware loads after the kernel (`initramfs ... followkernel`
 in `config.txt`) and describes in the device tree.
 
@@ -141,7 +173,7 @@ in `config.txt`) and describes in the device tree.
 1. ~~Physical page allocator; map all RAM~~
 2. ~~Higher-half kernel; per-process address spaces~~
 3. ~~User mode, system call interface, debug print; a first user program~~
-4. Threads, context switching (including FP/SIMD state), preemptive scheduling
+4. ~~Threads, context switching (including FP/SIMD state), preemptive scheduling~~
 5. initramfs (cpio) and an ELF loader; the kernel starts `/init`
 6. IPC and capabilities
 7. User-space console server (device memory and interrupt handles)

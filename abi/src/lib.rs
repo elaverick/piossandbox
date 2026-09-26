@@ -5,6 +5,12 @@
 //! arguments in `x0`-`x5`. The result comes back in `x0`: a non-negative
 //! value on success, or a negative [`Error`] code. Other registers are
 //! preserved.
+//!
+//! A program's entry point gets one argument, in `x0`, from whoever
+//! started it.
+//!
+//! Programs may read the time directly from the ARM generic timer's
+//! virtual counter (`CNTVCT_EL0`, ticking at `CNTFRQ_EL0` Hz).
 
 #![no_std]
 
@@ -15,6 +21,9 @@ pub mod call {
     pub const DEBUG_WRITE: usize = 0;
     /// `exit(code) -> !`: end the calling process.
     pub const EXIT: usize = 1;
+    /// `yield() -> 0`: let other threads run for the rest of this time
+    /// slice.
+    pub const YIELD: usize = 2;
 }
 
 /// The largest single `debug_write`.

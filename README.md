@@ -34,7 +34,9 @@ the machine, and echoes back anything typed on the serial console.
 | `src/paging.rs` | Page tables with typed permissions (W^X) |
 | `src/mmu.rs`, `src/cache.rs` | The kernel map, TTBR switching, address probes, cache maintenance |
 | `src/addrspace.rs` | User address spaces (TTBR0) |
-| `src/process.rs`, `src/elf.rs` | Loading ELF programs and running them at EL0 |
+| `src/process.rs`, `src/elf.rs` | Loading ELF programs and starting them at EL0 |
+| `src/thread.rs`, `src/thread.s` | Threads, the context switch and the preemptive scheduler |
+| `src/stack.rs` | Kernel stacks for threads, with guard pages |
 | `src/syscall.rs`, `src/user.rs` | System calls, and checked access to user memory |
 | `abi/` | The system call interface, shared by the kernel and user programs |
 | `user/` | User programs: `libpios` (their runtime), `hello`, and test programs |
@@ -43,7 +45,7 @@ the machine, and echoes back anything typed on the serial console.
 | `src/fdt.rs` | Device tree parser |
 | `docs/design.md` | The overall design: microkernel, IPC, capabilities, roadmap |
 | `src/cpu.rs`, `src/mmio.rs` | CPU identification, volatile register access |
-| `linker.ld` | Places the kernel at 0x80000 with `_start` first, then `.bss` and a 64 KiB stack |
+| `linker.ld` | Places the kernel at 0x80000 with `_start` first, then `.bss` and a 64 KiB boot stack (with a guard page) |
 | `boot/config.txt` | Firmware configuration for the SD card |
 | `tools/qemu-raspi5/` | A minimal Pi 5 machine for QEMU, for testing |
 | `scripts/` | QEMU tests (serial and screen), SD card assembly |
@@ -84,8 +86,8 @@ check the real Pi 4 and Pi 5 device trees if `make sdcard` has downloaded
 them, and the user programs if they have been built in `user/`.
 
 The serial test (`scripts/qemu-test.sh`) checks the banner (including that
-the kernel runs at EL1 and its exception, interrupt, memory, address space
-and user mode self-test passed), checks the `hello` user program's output,
+the kernel runs at EL1 and its exception, interrupt, memory, address space,
+user mode and thread self-test passed), checks the `hello` user program's output,
 types a line, and pastes a 12 KB burst that must be echoed back intact.
 
 The HDMI test (`scripts/qemu-screen-test.sh`) types enough to make the
@@ -194,21 +196,25 @@ Every exception saves the interrupted registers in a trap frame and calls
 execution resumes:
 
 - **IRQs** go to the GIC-400 driver, which dispatches each pending interrupt
-  to the handler registered for its ID.
-- **`svc`** is where system calls will go. For now `svc #n` just returns
-  `x0 + n`, which the boot self-test uses to check the round trip.
+  to the handler registered for its ID. If the timer tick ended the running
+  thread's time slice, the scheduler then switches threads.
+- **`svc`** from a user program is a system call, handled with interrupts
+  enabled. From the kernel, `svc #n` just returns `x0 + n`, which the boot
+  self-test uses to check the round trip.
 - **`brk`** is stepped over.
 - Anything else prints a register dump and stops.
 
 Two interrupts are in use, on both boards:
 
-- **ID 30, the EL1 physical timer**: a 100 Hz tick (`timer::tick_count`).
+- **ID 30, the EL1 physical timer**: a 100 Hz tick (`timer::tick_count`),
+  which also ends each thread's time slice.
 - **ID 153 (SPI 121), the console UART**: received bytes go into a 1 KiB
-  buffer that `console::getc` reads, sleeping with `wfi` while it is empty. If
+  buffer that `console::getc` reads, its thread parked while it is empty. If
   the buffer fills, the UART's receive interrupt is switched off and the data
   waits in the UART's FIFO until there is room again, so pasted text isn't
-  lost. On the Pi 5, RP1's UART0 is still polled: RP1's interrupts arrive as
-  PCIe MSIs, which pios doesn't set up yet.
+  lost. On the Pi 5, RP1's UART0 is still polled (letting other threads run
+  in between): RP1's interrupts arrive as PCIe MSIs, which pios doesn't set
+  up yet.
 
 SErrors (asynchronous aborts) are still masked. For instruction and data
 aborts, the fatal-exception report also decodes the fault (translation fault
@@ -225,9 +231,10 @@ Virtual addresses are 39 bits wide in each half of the address space:
 | Range | Contents | Page table |
 | --- | --- | --- |
 | `0x0000_0000_0000_0000` - `0x0000_007F_FFFF_FFFF` | the running process | TTBR0, one per process |
-| `0xFFFF_FF80_0000_0000` - `0xFFFF_FFFF_FFFF_FFFF` | the kernel | TTBR1 |
+| `0xFFFF_FF80_0000_0000` - `0xFFFF_FFBF_FFFF_FFFF` | the kernel: linear map of RAM and devices | TTBR1 |
+| `0xFFFF_FFC0_0000_0000` - `0xFFFF_FFFF_FFFF_FFFF` | the kernel: thread stacks | TTBR1 |
 
-The kernel half is a **linear map**: physical address `p` is at
+The kernel half starts with a **linear map**: physical address `p` is at
 `0xFFFF_FF80_0000_0000 + p`, and the kernel is linked at its place in it
 (`0xFFFF_FF80_0008_0000`). Physical and virtual addresses are different Rust
 types (`PhysAddr`, `VirtAddr`), converted only through the linear map.
@@ -254,7 +261,8 @@ types (`PhysAddr`, `VirtAddr`), converted only through the linear map.
    | --- | --- |
    | kernel code | read-execute |
    | kernel constants | read-only |
-   | kernel data, stack, all other RAM | read-write, never executable |
+   | kernel data, boot stack, all other RAM | read-write, never executable |
+   | thread stacks (mapped as threads are created) | read-write, never executable |
    | peripherals | Device, never executable |
    | framebuffer | Normal non-cacheable (write-combining) |
 
@@ -273,6 +281,11 @@ types (`PhysAddr`, `VirtAddr`), converted only through the linear map.
   the allocator when dropped, a `PageTable` frees its tables, and an
   `AddressSpace` frees both, switching away first if it is active.
 - `map` and `unmap` are all-or-nothing: on error nothing has changed.
+- Every kernel stack has an unmapped guard page (16 KiB for thread stacks)
+  below it. Exception entry checks the new trap frame fits above the
+  running thread's stack limit; if not, it reports the overflow from a spare
+  stack (`*** KERNEL STACK OVERFLOW in thread 6 (deep): ...`) instead of
+  faulting again and again.
 - The crate denies `unsafe` operations outside `unsafe` blocks and `unsafe`
   blocks without a `// SAFETY:` comment.
 
@@ -281,8 +294,7 @@ types (`PhysAddr`, `VirtAddr`), converted only through the linear map.
 `AddressSpace` (`src/addrspace.rs`) is one process's lower half: it maps
 zeroed pages with user permissions (never at page 0), can be activated
 (TTBR0; the whole TLB is flushed on each switch, as there are no address
-space IDs yet) and frees everything when dropped. Nothing runs in user mode
-yet; the boot self-test builds two address spaces and checks with the MMU's
+space IDs yet) and frees everything when dropped. The boot self-test builds two address spaces and checks with the MMU's
 address translation instruction that they are isolated, that permissions
 hold from user mode and kernel mode, that kernel code isn't writable and
 kernel data isn't executable, and that all memory comes back.
@@ -300,8 +312,8 @@ kernel through system calls. The kernel's build (`build.rs`) builds the
 programs in `user/` and embeds them in the kernel image; later they will
 come from an initramfs.
 
-At boot the kernel runs two test programs as part of its self-test, then
-`hello`:
+At boot the kernel runs four test programs at once as part of its
+self-test, then `hello`:
 
 ```
 Hello from user space!
@@ -328,7 +340,9 @@ fn main() -> i32 {
 ```
 
 `libpios` provides the entry point, `print!`/`println!`, a panic handler
-(which prints and exits with code 101) and the system calls. Programs are
+(which prints and exits with code 101), the system calls, the argument the
+program was started with (`argument()`) and the time (`counter()`, reading
+the ARM generic timer's counter, which user programs may do directly). Programs are
 built for `aarch64-unknown-none` (with floating point) and linked at
 `0x40_0000` by `user/libpios/user.ld`, with code, constants and data on
 separate pages. To add one, add it to `user/Cargo.toml` and to `PROGRAMS` in
@@ -344,6 +358,7 @@ defined once, in the `abi/` crate, which both sides use.
 | --- | --- | --- |
 | 0 | `debug_write(ptr, len)` | write to the kernel console (temporary, until the console server exists) |
 | 1 | `exit(code)` | end the program |
+| 2 | `yield()` | let other threads run for the rest of this time slice |
 
 ### Protection
 
@@ -352,8 +367,9 @@ defined once, in the `abi/` crate, which both sides use.
   segment both writable and executable, no two segments sharing a page, the
   entry point in code. Each segment is mapped with the permissions its flags
   ask for, plus a 64 KiB stack with an unmapped guard page below it.
-- **Starting.** Every register is cleared before the program starts, so no
-  kernel values leak into user space.
+- **Starting.** Every register (general purpose, FP/SIMD, FPCR/FPSR and
+  TPIDR_EL0) is cleared before the program starts, apart from its argument
+  in `x0`, so nothing leaks into it from the kernel or other programs.
 - **Pointers.** A pointer passed to a system call is only used after the
   MMU confirms, page by page, that the program itself could read it
   (`UserSlice` in `src/user.rs`). Kernel addresses, unmapped memory and
@@ -366,8 +382,35 @@ The self-test's `usertest` program checks the system calls from user space
 out right while timer interrupts arrive), and `crashtest` reads kernel
 memory, which must stop it with a fault.
 
-There is no scheduler yet: the kernel runs one program at a time, to
-completion.
+## Threads and scheduling
+
+Each process has one thread for now (`src/thread.rs`); the kernel has its
+own threads too: `kernel` (what `kernel_main` becomes once the scheduler
+starts, running the self-test and then the echo loop) and `idle`. Every
+thread has its own 16 KiB kernel stack.
+
+- **Preemptive, round-robin.** Every 100 Hz timer tick ends the running
+  thread's time slice and the next ready thread runs. Threads can also
+  `yield_now`, `park` until something calls `unpark` for them (the console
+  parks its reader until the UART interrupt has input), or `exit`. When
+  nothing is ready the idle thread waits in `wfi`.
+- **The context switch** (`src/thread.s`) saves the callee-saved registers,
+  the stack pointer, TPIDR_EL0, FPCR/FPSR and all 32 128-bit FP/SIMD
+  registers. The kernel is built without floating point, so the FP/SIMD
+  registers always hold the user thread's values. A user thread's other
+  registers, including its stack pointer (SP_EL0), are in the trap frame on
+  its kernel stack. Each thread also has its own lower-half page tables, set
+  on the way in.
+- **Finishing.** `exit` records how the thread ended and wakes whoever is
+  joining it; the next thread to run frees its stack (and its process's
+  memory), since nothing can free the stack it is running on.
+  `JoinHandle::join` returns the exit code or the fault.
+
+The boot self-test runs `usertest`, `crashtest` and two `fptest`s together.
+Each `fptest` fills every FP/SIMD register, FPCR, FPSR and TPIDR_EL0 with
+values from its argument, spins for a couple of time slices so the other
+takes turns with it, and checks nothing changed. The self-test also checks
+the programs were preempted, and that every thread and page came back.
 
 ## Heap
 

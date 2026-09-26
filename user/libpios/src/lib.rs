@@ -20,6 +20,7 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 use core::fmt;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub use pios_abi::Error;
 use pios_abi::call;
@@ -52,6 +53,43 @@ pub fn exit(code: i32) -> ! {
     unreachable!("exit returned")
 }
 
+/// Let other threads run for the rest of this time slice.
+pub fn yield_now() {
+    let _ = syscall(call::YIELD, 0, 0, 0);
+}
+
+/// The current time, in ticks of the system counter (see
+/// [`counter_frequency`]), from some point before the program started.
+pub fn counter() -> u64 {
+    let ticks: u64;
+    // SAFETY: the kernel lets user programs read the virtual counter. The
+    // `isb` stops the read being done early.
+    unsafe {
+        core::arch::asm!("isb", "mrs {}, cntvct_el0", out(reg) ticks, options(nomem, nostack))
+    };
+    ticks
+}
+
+/// Ticks per second of [`counter`].
+pub fn counter_frequency() -> u64 {
+    let hz: u64;
+    // SAFETY: readable whenever the counter is.
+    unsafe { core::arch::asm!("mrs {}, cntfrq_el0", out(reg) hz, options(nomem, nostack)) };
+    hz
+}
+
+/// The argument this program was started with.
+pub fn argument() -> usize {
+    ARGUMENT.load(Ordering::Relaxed)
+}
+
+static ARGUMENT: AtomicUsize = AtomicUsize::new(0);
+
+#[doc(hidden)]
+pub fn _set_argument(arg: usize) {
+    ARGUMENT.store(arg, Ordering::Relaxed);
+}
+
 /// Make a raw system call, for testing the kernel's argument checking.
 pub fn raw_syscall(number: usize, a0: usize, a1: usize, a2: usize) -> Result<usize, Error> {
     syscall(number, a0, a1, a2)
@@ -82,14 +120,16 @@ macro_rules! println {
     ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
 }
 
-/// Define the program's entry point: `_start` calls `$main` (a
-/// `fn() -> i32`) and exits with what it returns.
+/// Define the program's entry point: `_start` records its argument (for
+/// [`argument`]), calls `$main` (a `fn() -> i32`) and exits with what it
+/// returns.
 #[macro_export]
 macro_rules! pios_main {
     ($main:path) => {
         #[unsafe(no_mangle)]
         #[unsafe(link_section = ".text._start")]
-        pub extern "C" fn _start() -> ! {
+        pub extern "C" fn _start(arg: usize) -> ! {
+            $crate::_set_argument(arg);
             let main: fn() -> i32 = $main;
             $crate::exit(main())
         }
