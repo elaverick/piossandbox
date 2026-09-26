@@ -17,7 +17,7 @@ the machine, and echoes back anything typed on the serial console.
 
 | File | Purpose |
 | --- | --- |
-| `src/boot.s` | `_start`: parks secondary cores, relocates if needed, sets up the stack and exception vectors, zeroes `.bss`, calls `kernel_main` |
+| `src/boot.s` | `_start`: parks secondary cores, relocates if needed, drops to EL1, sets up the stack and exception vectors, zeroes `.bss`, calls `kernel_main`; the exception vector table |
 | `src/main.rs` | `kernel_main`, the panic handler |
 | `src/board.rs` | Pi 4 / Pi 5 detection, addresses and console bring-up |
 | `src/console.rs` | The console (output to every console UART and the display) and `print!`/`println!` |
@@ -26,8 +26,9 @@ the machine, and echoes back anything typed on the serial console.
 | `src/uart.rs` | PL011 UART driver |
 | `src/gpio.rs` | BCM2711 pin function and pull-up/down configuration |
 | `src/mailbox.rs` | VideoCore mailbox property interface |
-| `src/timer.rs` | ARM generic timer (used for timeouts) |
-| `src/exception.rs` | Reports unexpected exceptions (ESR/ELR/FAR) instead of hanging |
+| `src/timer.rs` | ARM generic timer: timeouts and the 100 Hz tick |
+| `src/exception.rs` | Trap frames, `svc`/`brk` handling, register dumps for fatal exceptions |
+| `src/gic.rs`, `src/irq.rs` | GIC-400 interrupt controller and interrupt dispatch |
 | `src/cpu.rs`, `src/mmio.rs` | CPU identification, volatile register access |
 | `linker.ld` | Places the kernel at 0x80000 with `_start` first, then `.bss` and a 64 KiB stack |
 | `boot/config.txt` | Firmware configuration for the SD card |
@@ -64,6 +65,10 @@ make run QEMU_DISPLAY=gtk   # ...and the HDMI output in a window
 make test       # boot, type into UART0, and check the serial and HDMI output
 ```
 
+The serial test (`scripts/qemu-test.sh`) checks the banner (including that
+the kernel runs at EL1 and its exception/interrupt self-test passed), types a
+line, and pastes a 12 KB burst that must be echoed back intact.
+
 The HDMI test (`scripts/qemu-screen-test.sh`) types enough to make the
 screen scroll, takes a screenshot through the QEMU monitor, turns the pixels
 back into text by matching them against the font, and checks the screen
@@ -77,7 +82,7 @@ hardware), run `make sdcard` first and then
 
 QEMU has no Pi 5 machine, so `tools/qemu-raspi5/` adds a minimal one,
 `raspi5-pios`: four Cortex-A76 cores numbered like the real BCM2712, the
-debug UART, RP1's UART0, the VideoCore mailbox at the Pi 5's address
+debug UART, RP1's UART0, a GIC-400, the VideoCore mailbox at the Pi 5's address
 (answered by QEMU's existing property-interface and framebuffer models), and
 a small fake firmware that leaves things the way the real firmware does. It
 checks addresses, board detection, the boot flow and the display path; it is
@@ -154,7 +159,37 @@ line pios can't reach RP1 and only uses the debug connector.
 If nothing appears, uncomment `uart_2ndstage=1` in `config.txt` to see the
 firmware's own boot log (on GPIO 14/15 on a Pi 4, on the debug connector on a
 Pi 5). If pios hits an unexpected exception it prints `UNHANDLED EXCEPTION`
-with the ESR/ELR/FAR registers.
+with the exception syndrome (ESR), the addresses involved (ELR, FAR) and all
+general-purpose registers.
+
+## Exceptions and interrupts
+
+The firmware starts pios at EL2 (the hypervisor level); `_start` drops to
+EL1, where kernels normally run, after letting EL1 use the timer and turning
+off EL2 traps.
+
+Every exception saves the interrupted registers in a trap frame and calls
+`exception_handler` in `src/exception.rs`, which can change the frame before
+execution resumes:
+
+- **IRQs** go to the GIC-400 driver, which dispatches each pending interrupt
+  to the handler registered for its ID.
+- **`svc`** is where system calls will go. For now `svc #n` just returns
+  `x0 + n`, which the boot self-test uses to check the round trip.
+- **`brk`** is stepped over.
+- Anything else prints a register dump and stops.
+
+Two interrupts are in use, on both boards:
+
+- **ID 30, the EL1 physical timer**: a 100 Hz tick (`timer::tick_count`).
+- **ID 153 (SPI 121), the console UART**: received bytes go into a 1 KiB
+  buffer that `console::getc` reads, sleeping with `wfi` while it is empty. If
+  the buffer fills, the UART's receive interrupt is switched off and the data
+  waits in the UART's FIFO until there is room again, so pasted text isn't
+  lost. On the Pi 5, RP1's UART0 is still polled: RP1's interrupts arrive as
+  PCIe MSIs, which pios doesn't set up yet.
+
+SErrors (asynchronous aborts) are still masked.
 
 ## Pi 4 vs Pi 5
 
@@ -164,6 +199,8 @@ with the ESR/ELR/FAR registers.
 | Peripherals | 0xFE00_0000 | 0x10_7C00_0000 (SoC), 0x1F_0000_0000 (RP1 via PCIe) |
 | Console | UART0 on GPIO 14/15 | debug UART (fixed 9.216 MHz clock) + RP1 UART0 on GPIO 14/15 |
 | Mailbox | 0xFE00_B880 | 0x10_7C01_3880 |
+| Interrupt controller | GIC-400 at 0xFF84_1000 | GIC-400 at 0x10_7FFF_9000 |
+| Console UART interrupt | ID 153 (UART0) | ID 153 (debug UART); RP1 UART0 polled |
 | GPU | VideoCore VI | VideoCore VII |
 | HDMI | firmware framebuffer via the mailbox | the same |
 | Below 0x80000 | firmware's spin tables | reserved for TF-A (secure firmware) |

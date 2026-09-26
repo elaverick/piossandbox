@@ -40,6 +40,14 @@ impl Model {
             Model::Pi5 => Mailbox::new(pi5::MBOX_BASE),
         }
     }
+
+    /// The GIC-400's distributor and CPU interface addresses.
+    pub fn gic(self) -> (usize, usize) {
+        match self {
+            Model::Pi4 => (pi4::GICD_BASE, pi4::GICC_BASE),
+            Model::Pi5 => (pi5::GICD_BASE, pi5::GICC_BASE),
+        }
+    }
 }
 
 /// A UART that was added to the console, for the boot banner.
@@ -48,6 +56,8 @@ pub struct ConsoleUart {
     /// The reference clock we programmed the UART with, or `None` if we kept
     /// the firmware's settings.
     pub clock_hz: Option<u32>,
+    /// Its interrupt ID, or `None` if input is polled.
+    pub irq: Option<u32>,
 }
 
 /// Set up the console UARTs for `model` and register them with the console.
@@ -56,8 +66,8 @@ pub fn init_console(model: Model) -> [Option<ConsoleUart>; 2] {
         Model::Pi4 => pi4::init_console(),
         Model::Pi5 => pi5::init_console(),
     };
-    for uart in uarts.iter().flatten() {
-        crate::console::add(uart.0);
+    for (uart, info) in uarts.iter().flatten() {
+        crate::console::add(*uart, info.irq);
     }
     uarts.map(|u| u.map(|(_, info)| info))
 }
@@ -72,6 +82,11 @@ mod pi4 {
     const GPIO_BASE: usize = MMIO_BASE + 0x20_0000;
     const UART0_BASE: usize = MMIO_BASE + 0x20_1000;
     pub const MBOX_BASE: usize = MMIO_BASE + 0xB880;
+    /// The GIC-400 sits in the "ARM local" block just above the peripherals.
+    pub const GICD_BASE: usize = 0xFF84_1000;
+    pub const GICC_BASE: usize = 0xFF84_2000;
+    /// UART0's interrupt: SPI 121 in the device tree.
+    const UART0_IRQ: u32 = 32 + 121;
 
     /// Clock we ask the firmware to run the UART at (as the OSDev tutorial
     /// does).
@@ -102,6 +117,7 @@ mod pi4 {
         let info = ConsoleUart {
             name: "UART0 on GPIO 14/15",
             clock_hz: Some(clock_hz),
+            irq: Some(UART0_IRQ),
         };
         [Some((uart0, info)), None]
     }
@@ -118,6 +134,10 @@ mod pi5 {
     /// Its fixed 9.216 MHz reference clock ("clk-uart" in the device tree).
     const DEBUG_UART_CLOCK_HZ: u32 = 9_216_000;
     pub const MBOX_BASE: usize = 0x10_7C01_3880;
+    pub const GICD_BASE: usize = 0x10_7FFF_9000;
+    pub const GICC_BASE: usize = 0x10_7FFF_A000;
+    /// The debug UART's interrupt: SPI 121 in the device tree.
+    const DEBUG_UART_IRQ: u32 = 32 + 121;
 
     /// The PCIe controller that connects the BCM2712 to RP1.
     const RP1_PCIE_BASE: usize = 0x10_0012_0000;
@@ -135,6 +155,7 @@ mod pi5 {
         let debug_info = ConsoleUart {
             name: "debug UART connector",
             clock_hz: Some(DEBUG_UART_CLOCK_HZ),
+            irq: Some(DEBUG_UART_IRQ),
         };
 
         // RP1 is only reachable if the firmware left the PCIe link up, which
@@ -145,13 +166,14 @@ mod pi5 {
             let uart0 = Pl011::new(RP1_UART0_BASE);
             if uart0.is_configured() {
                 uart0.enable();
-                Some((
-                    uart0,
-                    ConsoleUart {
-                        name: "RP1 UART0 on GPIO 14/15",
-                        clock_hz: None,
-                    },
-                ))
+                // RP1's interrupts reach the GIC as PCIe MSIs, which we
+                // don't set up yet, so this UART is polled.
+                let info = ConsoleUart {
+                    name: "RP1 UART0 on GPIO 14/15",
+                    clock_hz: None,
+                    irq: None,
+                };
+                Some((uart0, info))
             } else {
                 None
             }

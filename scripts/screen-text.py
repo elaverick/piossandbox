@@ -115,11 +115,9 @@ def main():
         return
 
     serial = Path(sys.argv[3]).read_text(errors="replace")
-    # Drop QEMU's own messages, which only go to the terminal.
-    serial = "".join(
-        line for line in serial.splitlines(keepends=True)
-        if not line.startswith("qemu-system-aarch64:")
-    )
+    # Drop QEMU's own messages, which only go to the terminal (and can land
+    # in the middle of a line of kernel output).
+    serial = re.sub(r"qemu-system-aarch64: [^\n]*\n?", "", serial)
     expected = emulate(serial, columns, len(screen))
     if screen == expected:
         print(f"display matches the serial console ({columns}x{len(screen)})")

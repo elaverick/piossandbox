@@ -15,7 +15,9 @@ mod cpu;
 mod exception;
 mod font;
 mod framebuffer;
+mod gic;
 mod gpio;
+mod irq;
 mod mailbox;
 mod mmio;
 mod timer;
@@ -46,6 +48,16 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     let mailbox = model.mailbox();
     let display = framebuffer::init(mailbox);
 
+    // Interrupts: the timer tick and interrupt-driven serial input.
+    let (gicd, gicc) = model.gic();
+    let irq_lines = irq::init(gicd, gicc);
+    irq::register(timer::TICK_IRQ, timer::handle_tick);
+    timer::start_tick();
+    console::enable_interrupts();
+    irq::enable();
+
+    let self_test = self_test();
+
     println!();
     println!("Hello, world!");
     println!();
@@ -73,17 +85,31 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     );
     for uart in uarts.iter().flatten() {
         match uart.clock_hz {
-            Some(hz) => println!(
+            Some(hz) => print!(
                 "  console         : {}, {} baud ({} Hz clock)",
                 uart.name,
                 uart::BAUD_RATE,
                 hz
             ),
-            None => println!(
+            None => print!(
                 "  console         : {} (as set up by the firmware)",
                 uart.name
             ),
         }
+        match uart.irq {
+            Some(id) => println!(", IRQ {}", id),
+            None => println!(", polled"),
+        }
+    }
+    println!(
+        "  interrupts      : GIC-400 at {:#x} ({} IDs), {} Hz timer tick",
+        gicd,
+        irq_lines,
+        timer::TICK_HZ
+    );
+    match self_test {
+        Ok(()) => println!("  self-test       : svc, brk and timer interrupts OK"),
+        Err(e) => println!("  self-test       : FAILED: {}", e),
     }
 
     match &display {
@@ -133,6 +159,40 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     }
 }
 
+/// Check that exceptions return correctly and the timer interrupt is
+/// running.
+fn self_test() -> Result<(), &'static str> {
+    // `svc #n` returns x0 + n (see exception.rs).
+    let result: u64;
+    // SAFETY: the exception handler returns from `svc` with only x0 changed.
+    unsafe { core::arch::asm!("svc #0x42", inout("x0") 5u64 => result) };
+    if result != 5 + 0x42 {
+        return Err("svc did not return the expected value");
+    }
+
+    let before = exception::breakpoints();
+    // SAFETY: the exception handler steps over `brk`.
+    unsafe { core::arch::asm!("brk #1") };
+    if exception::breakpoints() != before + 1 {
+        return Err("brk was not handled");
+    }
+
+    // Over 50 ms, a 100 Hz tick should advance by about 5.
+    let start = timer::tick_count();
+    let deadline = timer::Deadline::after_us(50_000);
+    while !deadline.expired() {
+        core::hint::spin_loop();
+    }
+    let ticks = timer::tick_count() - start;
+    if !(3..=7).contains(&ticks) {
+        return Err("the timer tick is not running at the expected rate");
+    }
+    if irq::unexpected() != 0 {
+        return Err("unexpected interrupts arrived");
+    }
+    Ok(())
+}
+
 /// Does `addr` point at a flattened device tree (big-endian magic 0xd00dfeed)?
 fn is_device_tree(addr: usize) -> bool {
     const FDT_MAGIC: u32 = 0xD00D_FEED;
@@ -145,6 +205,7 @@ fn is_device_tree(addr: usize) -> bool {
 
 /// Stop this core for good.
 pub fn halt() -> ! {
+    irq::disable();
     loop {
         // SAFETY: `wfe` just idles the core until an event arrives.
         unsafe { core::arch::asm!("wfe", options(nomem, nostack)) };

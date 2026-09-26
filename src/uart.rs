@@ -11,6 +11,7 @@ const IBRD: usize = 0x24; // Integer baud rate divisor
 const FBRD: usize = 0x28; // Fractional baud rate divisor
 const LCRH: usize = 0x2C; // Line control
 const CR: usize = 0x30; // Control
+const IFLS: usize = 0x34; // Interrupt FIFO level select
 const IMSC: usize = 0x38; // Interrupt mask set/clear
 const ICR: usize = 0x44; // Interrupt clear
 
@@ -24,6 +25,9 @@ const LCRH_WLEN_8: u32 = 0b11 << 5; // 8 data bits
 const CR_UARTEN: u32 = 1 << 0;
 const CR_TXE: u32 = 1 << 8;
 const CR_RXE: u32 = 1 << 9;
+const INT_RX: u32 = 1 << 4; // Receive FIFO reached its trigger level
+const INT_RT: u32 = 1 << 6; // Receive timeout: data waiting, line idle
+
 const CR_RTSEN: u32 = 1 << 14; // Hardware (RTS) flow control
 const CR_CTSEN: u32 = 1 << 15; // Hardware (CTS) flow control
 
@@ -87,6 +91,33 @@ impl Pl011 {
     pub fn enable(&self) {
         let cr = mmio::read(self.base + CR) & !(CR_RTSEN | CR_CTSEN);
         mmio::write(self.base + CR, cr | CR_UARTEN | CR_TXE | CR_RXE);
+    }
+
+    /// Raise an interrupt when data arrives: as soon as the receive FIFO is
+    /// 1/8 full, or when anything has been waiting for 32 bit periods.
+    pub fn enable_rx_interrupt(&self) {
+        mmio::write(self.base + IFLS, 0); // receive trigger at 1/8 full
+        mmio::write(self.base + ICR, INT_RX | INT_RT);
+        mmio::write(self.base + IMSC, INT_RX | INT_RT);
+    }
+
+    /// Stop raising receive interrupts, leaving data in the FIFO.
+    pub fn disable_rx_interrupt(&self) {
+        mmio::write(self.base + IMSC, 0);
+    }
+
+    /// Interrupt handler body: move received bytes to `push` while
+    /// `has_room()`. Returns false if bytes were left in the FIFO for lack
+    /// of room.
+    pub fn drain_rx(&self, has_room: impl Fn() -> bool, mut push: impl FnMut(u8)) -> bool {
+        mmio::write(self.base + ICR, INT_RX | INT_RT);
+        while mmio::read(self.base + FR) & FR_RXFE == 0 {
+            if !has_room() {
+                return false;
+            }
+            push(mmio::read(self.base + DR) as u8);
+        }
+        true
     }
 
     /// Send one byte, waiting for room in the transmit FIFO.

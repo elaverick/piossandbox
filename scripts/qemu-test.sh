@@ -15,7 +15,7 @@ QEMU=${QEMU:-qemu-system-aarch64}
 MACHINE=${MACHINE:-raspi4b}
 CONSOLE=${CONSOLE:-0}
 DTB=${DTB:-}
-TIMEOUT=${TIMEOUT:-10}
+TIMEOUT=${TIMEOUT:-15}
 INPUT="echo test 123"
 
 if ! "$QEMU" -M help | grep -q "^$MACHINE "; then
@@ -37,11 +37,19 @@ args+=(-serial stdio)
 
 # Feed input after the kernel has had time to boot, then let QEMU run until
 # the timeout kills it.
-{ sleep 2; printf '%s\r' "$INPUT"; sleep 1; } |
+# Then paste a burst much bigger than the kernel's input buffer, which must
+# arrive intact.
+{
+    sleep 2
+    printf '%s\r' "$INPUT"
+    for i in $(seq -w 1 300); do printf 'burst %s abcdefghijklmnopqrstuvwxyz\r' "$i"; done
+    sleep 5
+} |
     timeout "$TIMEOUT" "$QEMU" "${args[@]}" >"$out" 2>&1 || true
 
 echo "----- $MACHINE, UART $CONSOLE -----"
-tr -d '\r' <"$out" | grep -av "^qemu-system-aarch64: warning: bcm2711 dtc:"
+tr -d '\r' <"$out" | grep -av "^qemu-system-aarch64: warning: bcm2711 dtc:" | grep -av "^burst "
+echo "(and $(grep -ac "^burst " "$out") lines of burst input)"
 echo "------------------------"
 
 fail=0
@@ -53,8 +61,16 @@ check() {
 
 check "Hello, world!" "kernel prints greeting"
 check "on Raspberry Pi" "kernel prints banner"
+check "running at EL1" "kernel drops to EL1"
+check "svc, brk and timer interrupts OK" "exception and interrupt self-test passes"
 check "Type something" "kernel reaches echo loop"
 check "$INPUT" "kernel echoes input"
+expected_burst=$(for i in $(seq -w 1 300); do echo "burst $i abcdefghijklmnopqrstuvwxyz"; done)
+if [[ $(tr -d '\r' <"$out" | grep -a "^burst ") == "$expected_burst" ]]; then
+    pass "a 12 KB burst of input arrives intact"
+else
+    failed "a 12 KB burst of input arrives intact"
+fi
 greetings=$(grep -ao "Hello, world!" "$out" | wc -l)
 if [[ $greetings -eq 1 ]]; then
     pass "only one core runs the kernel"
