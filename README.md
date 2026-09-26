@@ -77,9 +77,11 @@ hardware), run `make sdcard` first and then
 
 QEMU has no Pi 5 machine, so `tools/qemu-raspi5/` adds a minimal one,
 `raspi5-pios`: four Cortex-A76 cores numbered like the real BCM2712, the
-debug UART, RP1's UART0, and a small fake firmware that leaves things the way
-the real firmware does. It checks addresses, board detection and the boot
-flow; it is not an emulation of the BCM2712. Build QEMU with it from a QEMU
+debug UART, RP1's UART0, the VideoCore mailbox at the Pi 5's address
+(answered by QEMU's existing property-interface and framebuffer models), and
+a small fake firmware that leaves things the way the real firmware does. It
+checks addresses, board detection, the boot flow and the display path; it is
+not an emulation of the BCM2712 or its VideoCore VII GPU. Build QEMU with it from a QEMU
 9.2 source tree:
 
 ```sh
@@ -88,10 +90,9 @@ make test-pi5 QEMU_PI5=~/qemu-pios/bin/qemu-system-aarch64
 make run-pi5  QEMU_PI5=~/qemu-pios/bin/qemu-system-aarch64
 ```
 
-`test-pi5` runs the test on both UARTs. `run-pi5` puts the debug UART on your
-terminal and writes RP1 UART0's output to `rp1-uart0.log`. The model has no
-VideoCore, so there is no HDMI output, and the banner reports that the
-firmware did not answer.
+`test-pi5` runs the serial test on both UARTs and the HDMI test. `run-pi5`
+puts the debug UART on your terminal and writes RP1 UART0's output to
+`rp1-uart0.log`; add `QEMU_DISPLAY=gtk` to see the screen.
 
 ## Running on real hardware
 
@@ -116,9 +117,21 @@ the Pi 4, RP1 on the Pi 5).
 ### HDMI
 
 pios asks the GPU firmware for a 32-bit framebuffer at the display's native
-resolution (the same mailbox interface on both boards) and draws text on it
-with an 8x16 font, doubled in size on displays 1600 pixels or wider. If the
-screen stays black, try uncommenting `hdmi_force_hotplug=1` in `config.txt`.
+resolution and draws text on it with an 8x16 font, doubled in size on
+displays 1600 pixels or wider. The banner shows the framebuffer it got and
+how many displays the firmware found.
+
+Both boards' GPUs (VideoCore VI on the Pi 4, VideoCore VII on the Pi 5) run
+firmware that offers this framebuffer through the documented
+[mailbox property interface](https://github.com/raspberrypi/firmware/wiki/Mailbox-property-interface).
+pios follows the tag sequence and pixel layout of Linux's `bcm2708_fb`
+driver, which the Pi 5's device tree still enables. (Raspberry Pi OS itself
+drives the display with its KMS driver, which programs the display hardware
+directly; that is a much bigger job, needed only for things like
+multiple displays or hardware-accelerated graphics.)
+
+If the screen stays black, try uncommenting `hdmi_force_hotplug=1` in
+`config.txt`.
 
 Until the MMU and caches are enabled, framebuffer memory is uncached and
 slow to write, so scrolling redraws only the character cells that change.
@@ -151,6 +164,7 @@ with the ESR/ELR/FAR registers.
 | Peripherals | 0xFE00_0000 | 0x10_7C00_0000 (SoC), 0x1F_0000_0000 (RP1 via PCIe) |
 | Console | UART0 on GPIO 14/15 | debug UART (fixed 9.216 MHz clock) + RP1 UART0 on GPIO 14/15 |
 | Mailbox | 0xFE00_B880 | 0x10_7C01_3880 |
+| GPU | VideoCore VI | VideoCore VII |
 | HDMI | firmware framebuffer via the mailbox | the same |
 | Below 0x80000 | firmware's spin tables | reserved for TF-A (secure firmware) |
 

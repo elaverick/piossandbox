@@ -18,10 +18,20 @@ const MAX_HEIGHT: usize = 2160;
 /// Used if the firmware can't tell us the display's native resolution.
 const DEFAULT_SIZE: (u32, u32) = (1024, 768);
 
-/// Light grey on black. Red, green and blue are equal, so these look the same
-/// whichever byte order (RGB or BGR) the firmware chose.
-const FOREGROUND: u32 = 0xFFC0_C0C0;
-const BACKGROUND: u32 = 0xFF00_0000;
+/// Light grey on black.
+///
+/// Pixels are 32 bits with red in the low byte, then green, blue and alpha,
+/// as the Linux driver for this framebuffer (bcm2708_fb) sets them up. The
+/// firmware's alpha mode is not something we choose, and in one of the
+/// documented modes 0 is opaque, so the alpha byte is left at 0 as Linux's
+/// console does. Red, green and blue are equal for now, so the colours are
+/// right even if a display has red and blue swapped.
+const FOREGROUND: u32 = rgb(0xC0, 0xC0, 0xC0);
+const BACKGROUND: u32 = rgb(0, 0, 0);
+
+const fn rgb(red: u8, green: u8, blue: u8) -> u32 {
+    red as u32 | (green as u32) << 8 | (blue as u32) << 16
+}
 
 /// A 32 bits-per-pixel framebuffer.
 #[derive(Clone, Copy)]
@@ -42,6 +52,12 @@ impl FrameBuffer {
     };
 
     /// Ask the firmware for a framebuffer at the display's native resolution.
+    ///
+    /// This follows the firmware's documented property interface
+    /// (github.com/raspberrypi/firmware/wiki/Mailbox-property-interface) and
+    /// the tag sequence Linux's bcm2708_fb driver uses when the firmware
+    /// allocates the buffer. The Pi 5's device tree still enables that driver,
+    /// so the interface works the same on the Pi 4 and Pi 5.
     pub fn allocate(mailbox: Mailbox) -> Option<FrameBuffer> {
         let mut size = [0u32; 2];
         let (width, height) = match mailbox.property(mailbox::TAG_GET_DISPLAY_SIZE, &mut size) {
@@ -304,10 +320,19 @@ pub struct DisplayInfo {
     pub fb: FrameBuffer,
     pub columns: usize,
     pub rows: usize,
+    /// How many displays the firmware says are attached, if it said.
+    pub displays: Option<u32>,
 }
 
 /// Allocate a framebuffer and start the display console on it.
 pub fn init(mailbox: Mailbox) -> Option<DisplayInfo> {
+    // Diagnostic only: with hdmi_force_hotplug=1 the firmware drives HDMI
+    // even when it counts no displays, so we carry on either way.
+    let mut count = [0u32; 1];
+    let displays = mailbox
+        .property(mailbox::TAG_GET_NUM_DISPLAYS, &mut count)
+        .map(|()| count[0]);
+
     let fb = FrameBuffer::allocate(mailbox)?;
     CONSOLE.with(|console| {
         console.start(fb);
@@ -315,6 +340,7 @@ pub fn init(mailbox: Mailbox) -> Option<DisplayInfo> {
             fb,
             columns: console.columns,
             rows: console.rows,
+            displays,
         }
     })
 }

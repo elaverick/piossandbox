@@ -10,8 +10,10 @@
  *   - the debug UART (PL011) at 0x10_7d00_1000              -> -serial #1
  *   - RP1 UART0 (PL011, GPIO 14/15) at 0x1f_0003_0000        -> -serial #2
  *   - the RP1 PCIe controller's registers at 0x10_0012_0000 (plain RAM)
- *   - the VideoCore mailbox at 0x10_7c01_3880 (unimplemented: never
- *     answers, so pios's mailbox timeouts get exercised)
+ *   - the VideoCore mailbox at 0x10_7c01_3880, answered by QEMU's existing
+ *     BCM2835 property and framebuffer models (the property interface is
+ *     the same on every Pi), so -display or screendump shows the "HDMI"
+ *     output
  *
  * A small fake firmware (fake-firmware.s) at address 0 sets up RP1 UART0
  * and the PCIe link status the way the real firmware does with
@@ -35,6 +37,11 @@
 #include "hw/loader.h"
 #include "hw/char/pl011.h"
 #include "hw/misc/unimp.h"
+#include "hw/misc/bcm2835_mbox.h"
+#include "hw/misc/bcm2835_mbox_defs.h"
+#include "hw/misc/bcm2835_property.h"
+#include "hw/display/bcm2835_fb.h"
+#include "hw/nvram/bcm2835_otp.h"
 #include "sysemu/sysemu.h"
 #include "cpu.h"
 
@@ -42,6 +49,11 @@
 #define RP1_UART0_BASE      0x1f00030000ULL
 #define RP1_PCIE_BASE       0x1000120000ULL
 #define MBOX_BASE           0x107c013880ULL
+/* QEMU's mailbox device has its registers at offset 0x80. */
+#define MBOX_DEVICE_BASE    (MBOX_BASE - 0x80)
+/* Raspberry Pi 5 Model B, 8 GB, revision 1.0. */
+#define BOARD_REVISION      0xd04170
+#define VCRAM_SIZE          (16 * MiB)
 #define KERNEL_ADDR         0x80000
 #define DTB_ADDR            0x08000000
 
@@ -52,6 +64,48 @@ static const uint32_t fake_firmware[] = {
     0xd2a10000, 0xd2a00103, 0xd61f0060, 0x00000000, 0x00030000, 0x0000001f,
     0x00124068, 0x00000010,
 };
+
+/*
+ * The VideoCore mailbox, with the property channel and framebuffer behind it,
+ * wired up the way hw/arm/bcm2835_peripherals.c does it.
+ */
+static void raspi5_pios_videocore_init(MachineState *ms)
+{
+    MemoryRegion *sysmem = get_system_memory();
+    MemoryRegion *mbox_mr = g_new(MemoryRegion, 1);
+    DeviceState *mbox = qdev_new(TYPE_BCM2835_MBOX);
+    DeviceState *fb = qdev_new(TYPE_BCM2835_FB);
+    DeviceState *property = qdev_new(TYPE_BCM2835_PROPERTY);
+    DeviceState *otp = qdev_new(TYPE_BCM2835_OTP);
+
+    memory_region_init(mbox_mr, OBJECT(ms), "raspi5-mbox", MBOX_CHAN_COUNT << 4);
+
+    object_property_add_const_link(OBJECT(mbox), "mbox-mr", OBJECT(mbox_mr));
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(mbox), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(mbox), 0, MBOX_DEVICE_BASE);
+
+    /* The GPU's memory is the top of RAM, as on real Pis. */
+    qdev_prop_set_uint32(fb, "vcram-base", ms->ram_size - VCRAM_SIZE);
+    qdev_prop_set_uint32(fb, "vcram-size", VCRAM_SIZE);
+    object_property_add_const_link(OBJECT(fb), "dma-mr", OBJECT(sysmem));
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(fb), &error_fatal);
+    memory_region_add_subregion(mbox_mr, MBOX_CHAN_FB << MBOX_AS_CHAN_SHIFT,
+                                sysbus_mmio_get_region(SYS_BUS_DEVICE(fb), 0));
+    sysbus_connect_irq(SYS_BUS_DEVICE(fb), 0,
+                       qdev_get_gpio_in(mbox, MBOX_CHAN_FB));
+
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(otp), &error_fatal);
+
+    qdev_prop_set_uint32(property, "board-rev", BOARD_REVISION);
+    object_property_add_const_link(OBJECT(property), "fb", OBJECT(fb));
+    object_property_add_const_link(OBJECT(property), "dma-mr", OBJECT(sysmem));
+    object_property_add_const_link(OBJECT(property), "otp", OBJECT(otp));
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(property), &error_fatal);
+    memory_region_add_subregion(mbox_mr, MBOX_CHAN_PROPERTY << MBOX_AS_CHAN_SHIFT,
+                        sysbus_mmio_get_region(SYS_BUS_DEVICE(property), 0));
+    sysbus_connect_irq(SYS_BUS_DEVICE(property), 0,
+                       qdev_get_gpio_in(mbox, MBOX_CHAN_PROPERTY));
+}
 
 static void raspi5_pios_init(MachineState *ms)
 {
@@ -77,7 +131,7 @@ static void raspi5_pios_init(MachineState *ms)
     memory_region_init_ram(pcie, NULL, "rp1-pcie-regs", 0x10000, &error_fatal);
     memory_region_add_subregion(sysmem, RP1_PCIE_BASE, pcie);
 
-    create_unimplemented_device("mailbox", MBOX_BASE, 0x40);
+    raspi5_pios_videocore_init(ms);
 
     rom_add_blob_fixed("fake-firmware", fake_firmware, sizeof(fake_firmware), 0);
 

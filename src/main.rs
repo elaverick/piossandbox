@@ -87,14 +87,19 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     }
 
     match &display {
-        Some(d) => println!(
-            "  display         : {}x{} framebuffer at {:#010x}, {}x{} characters",
-            d.fb.width(),
-            d.fb.height(),
-            d.fb.base(),
-            d.columns,
-            d.rows
-        ),
+        Some(d) => {
+            println!(
+                "  display         : {}x{} framebuffer at {:#010x}, {}x{} characters",
+                d.fb.width(),
+                d.fb.height(),
+                d.fb.base(),
+                d.columns,
+                d.rows
+            );
+            if let Some(n) = d.displays {
+                println!("  displays found  : {}", n);
+            }
+        }
         None => println!("  display         : none (the firmware did not provide a framebuffer)"),
     }
     let mut revision = [0u32; 1];

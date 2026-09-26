@@ -5,7 +5,7 @@
 #   make test       boot it in QEMU's Pi 4 model and check the serial and
 #                   HDMI output
 #   make run-pi5    boot it in the raspi5-pios model (see tools/qemu-raspi5)
-#   make test-pi5   test it on the raspi5-pios model, on both UARTs
+#   make test-pi5   test it on the raspi5-pios model: both UARTs and HDMI
 #   make sdcard     assemble a bootable SD card directory in build/sdcard
 #   make disasm     disassemble the kernel
 
@@ -48,7 +48,7 @@ run: $(IMG)
 
 # The debug UART is on your terminal; RP1 UART0 (GPIO 14/15) goes to a file.
 run-pi5: $(IMG)
-	$(QEMU_PI5) -M raspi5-pios $(QEMU_ARGS) -display none -serial stdio -serial file:rp1-uart0.log
+	$(QEMU_PI5) -M raspi5-pios $(QEMU_ARGS) -display $(QEMU_DISPLAY) -serial stdio -serial file:rp1-uart0.log
 
 test: $(IMG)
 	QEMU="$(QEMU)" DTB="$(DTB)" ./scripts/qemu-test.sh $(IMG)
@@ -57,6 +57,7 @@ test: $(IMG)
 test-pi5: $(IMG)
 	QEMU="$(QEMU_PI5)" MACHINE=raspi5-pios CONSOLE=0 DTB="$(DTB)" ./scripts/qemu-test.sh $(IMG)
 	QEMU="$(QEMU_PI5)" MACHINE=raspi5-pios CONSOLE=1 DTB="$(DTB)" ./scripts/qemu-test.sh $(IMG)
+	QEMU="$(QEMU_PI5)" MACHINE=raspi5-pios ./scripts/qemu-screen-test.sh $(IMG)
 
 sdcard: $(IMG)
 	./scripts/make-sdcard.sh $(IMG) build/sdcard

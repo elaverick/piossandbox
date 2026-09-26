@@ -6,6 +6,7 @@ set -euo pipefail
 
 IMG=${1:-kernel8.img}
 QEMU=${QEMU:-qemu-system-aarch64}
+MACHINE=${MACHINE:-raspi4b}
 TIMEOUT=${TIMEOUT:-15}
 HERE=$(cd "$(dirname "$0")" && pwd)
 
@@ -37,7 +38,7 @@ PY
     sleep 2
     monitor "screendump $tmp/screen.ppm"
     sleep 1
-} | timeout "$TIMEOUT" "$QEMU" -M raspi4b -kernel "$IMG" -serial stdio \
+} | timeout "$TIMEOUT" "$QEMU" -M "$MACHINE" -kernel "$IMG" -serial stdio \
         -display none -monitor "unix:$tmp/monitor.sock,server,nowait" \
         >"$tmp/serial.txt" 2>&1 || true
 
@@ -47,7 +48,7 @@ if [[ ! -s $tmp/screen.ppm ]]; then
     exit 1
 fi
 
-echo "----- raspi4b display -----"
+echo "----- $MACHINE display -----"
 python3 "$HERE/screen-text.py" "$tmp/screen.ppm"
 echo "---------------------------"
 
