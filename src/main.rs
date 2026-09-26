@@ -22,6 +22,7 @@ mod addrspace;
 #[allow(dead_code)] // shared with the host tests, which use more of it
 mod allocator;
 mod board;
+mod bootimage;
 mod cache;
 mod console;
 mod cpu;
@@ -36,6 +37,7 @@ mod framebuffer;
 mod frames;
 mod gic;
 mod gpio;
+mod handle;
 mod heap;
 mod irq;
 mod mailbox;
@@ -185,6 +187,16 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
         Some((start, size)) => println!("  heap            : {} MiB at {:#x}", size >> 20, start),
         None => println!("  heap            : none (not enough free memory)"),
     }
+    let boot_image = bootimage::image();
+    print!(
+        "  boot image      : {} KiB, {} programs:",
+        boot_image.as_bytes().len() >> 10,
+        boot_image.len()
+    );
+    for file in boot_image.files() {
+        print!(" {}", file.name);
+    }
+    println!();
     let threads = thread::stats();
     println!(
         "  threads         : {}, round-robin with {} ms time slices; {} switches so far, {} preemptive",
@@ -230,9 +242,13 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
         );
     }
 
-    // The first user program.
+    // Start the system: `init`, from the boot image, starts the rest.
     println!();
-    run_program("hello", process::programs::HELLO);
+    match process::spawn_init().map(thread::JoinHandle::join) {
+        Ok(process::Exit::Code(code)) => println!("[init exited with code {}]", code),
+        Ok(process::Exit::Fault(fault)) => println!("[init was stopped: {}]", fault),
+        Err(e) => println!("[init could not be started: {}]", e),
+    }
 
     println!();
     println!("Type something and it will be echoed back.");
@@ -306,15 +322,6 @@ fn self_test() -> Result<(), &'static str> {
     addrspace::self_test()?;
     process::self_test()?;
     Ok(())
-}
-
-/// Run a user program and wait for it to finish, reporting how it ended.
-fn run_program(name: &'static str, image: &[u8]) {
-    match process::spawn(name, image, 0).map(thread::JoinHandle::join) {
-        Ok(process::Exit::Code(code)) => println!("[{} exited with code {}]", name, code),
-        Ok(process::Exit::Fault(fault)) => println!("[{} was stopped: {}]", name, fault),
-        Err(e) => println!("[{} could not be loaded: {}]", name, e),
-    }
 }
 
 /// The timer interrupt: count the tick, and end the running thread's time

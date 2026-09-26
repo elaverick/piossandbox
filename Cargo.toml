@@ -13,6 +13,10 @@ bench = false
 
 [dependencies]
 pios-abi = { path = "abi" }
+pios-bootfs = { path = "bootfs" }
+
+[build-dependencies]
+pios-bootfs = { path = "bootfs", features = ["builder"] }
 
 [profile.dev]
 panic = "abort"

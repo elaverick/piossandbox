@@ -65,6 +65,8 @@ check "running at EL1" "kernel drops to EL1"
 check "address spaces, user mode and threads OK" "exception, interrupt, memory, user mode and thread self-test passes"
 check "Hello from user space!" "a user program runs and prints"
 check "[hello exited with code 0]" "the user program exits back to the kernel"
+check "init: starting the system from a boot image" "the kernel starts init from the boot image"
+check "[init exited with code 0]" "init starts hello, waits for it and exits cleanly"
 check "Type something" "kernel reaches echo loop"
 check "$INPUT" "kernel echoes input"
 expected_burst=$(for i in $(seq -w 1 300); do echo "burst $i abcdefghijklmnopqrstuvwxyz"; done)

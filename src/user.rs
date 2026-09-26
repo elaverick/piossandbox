@@ -52,8 +52,10 @@ impl UserSlice {
             "read past the end of a user slice"
         );
         // SAFETY: `new` checked the program can read the whole range, and
-        // nothing can change its mappings while the kernel runs (one core,
-        // and the program is stopped in this system call).
+        // nothing can have changed its mappings since: only the process's
+        // own thread could, and it is in this system call. (Other threads
+        // may run meanwhile, but switching back restores this process's
+        // address space.)
         unsafe {
             core::ptr::copy_nonoverlapping(
                 (self.addr + offset) as *const u8,

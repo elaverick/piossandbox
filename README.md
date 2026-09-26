@@ -34,12 +34,14 @@ the machine, and echoes back anything typed on the serial console.
 | `src/paging.rs` | Page tables with typed permissions (W^X) |
 | `src/mmu.rs`, `src/cache.rs` | The kernel map, TTBR switching, address probes, cache maintenance |
 | `src/addrspace.rs` | User address spaces (TTBR0) |
-| `src/process.rs`, `src/elf.rs` | Loading ELF programs and starting them at EL0 |
+| `src/process.rs`, `src/elf.rs` | Loading ELF programs and starting them at EL0; starting `init` |
+| `src/bootimage.rs`, `bootfs/` | The boot image of user programs built into the kernel, and its format |
+| `src/handle.rs` | Per-process handle tables |
 | `src/thread.rs`, `src/thread.s` | Threads, the context switch and the preemptive scheduler |
 | `src/stack.rs` | Kernel stacks for threads, with guard pages |
 | `src/syscall.rs`, `src/user.rs` | System calls, and checked access to user memory |
 | `abi/` | The system call interface, shared by the kernel and user programs |
-| `user/` | User programs: `libpios` (their runtime), `hello`, and test programs |
+| `user/` | User programs: `libpios` (their runtime), `init`, `hello`, and test programs |
 | `src/heap.rs`, `src/allocator.rs` | The kernel heap behind `Box`/`Vec`/`String`, and its free-list allocator |
 | `src/sync.rs` | `SpinLock` (masks IRQs while held) |
 | `src/fdt.rs` | Device tree parser |
@@ -87,7 +89,8 @@ them, and the user programs if they have been built in `user/`.
 
 The serial test (`scripts/qemu-test.sh`) checks the banner (including that
 the kernel runs at EL1 and its exception, interrupt, memory, address space,
-user mode and thread self-test passed), checks the `hello` user program's output,
+user mode and thread self-test passed), checks that `init` starts from the
+boot image and runs the `hello` user program,
 types a line, and pastes a 12 KB burst that must be echoed back intact.
 
 The HDMI test (`scripts/qemu-screen-test.sh`) types enough to make the
@@ -309,17 +312,23 @@ kernel data isn't executable, and that all memory comes back.
 
 User programs run at EL0, each in its own address space, and talk to the
 kernel through system calls. The kernel's build (`build.rs`) builds the
-programs in `user/` and embeds them in the kernel image; later they will
-come from an initramfs.
+programs in `user/` and packs them into a **boot image** built into the
+kernel (see [docs/design.md](docs/design.md#decisions) for why this rather
+than a Linux-style initramfs). The boot image is a small read-only archive:
+a directory, then each program on a page boundary.
 
-At boot the kernel runs four test programs at once as part of its
-self-test, then `hello`:
+At boot the kernel runs four test programs from the boot image at once as
+part of its self-test. Then it starts `init`, with the whole boot image
+mapped read-only into it, and `init` starts everything else, for now just
+`hello`:
 
 ```
+init: starting the system from a boot image of 5 programs
 Hello from user space!
   25 primes below 100: [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97]
   (running at EL0, stack near 0x3fffffff80)
 [hello exited with code 0]
+[init exited with code 0]
 ```
 
 ### Writing one
@@ -346,7 +355,9 @@ the ARM generic timer's counter, which user programs may do directly). Programs 
 built for `aarch64-unknown-none` (with floating point) and linked at
 `0x40_0000` by `user/libpios/user.ld`, with code, constants and data on
 separate pages. To add one, add it to `user/Cargo.toml` and to `PROGRAMS` in
-`build.rs`.
+`build.rs`, which puts it in the boot image. Programs start others with
+`libpios::spawn(elf_bytes, arg)`, which returns a `Child`: `child.wait()`
+waits for it to end, and dropping it gives up the handle.
 
 ### System calls
 
@@ -359,6 +370,13 @@ defined once, in the `abi/` crate, which both sides use.
 | 0 | `debug_write(ptr, len)` | write to the kernel console (temporary, until the console server exists) |
 | 1 | `exit(code)` | end the program |
 | 2 | `yield()` | let other threads run for the rest of this time slice |
+| 3 | `spawn(ptr, len, arg)` | start the ELF executable in the caller's memory as a new process; returns a handle to it |
+| 4 | `wait(handle)` | wait for that process to end, close the handle, and return its exit code or fault |
+| 5 | `close(handle)` | give up a handle |
+
+Handles are numbers in a per-process table the kernel keeps, so they can't
+be forged; for now the only kind refers to a child process. They are the
+start of the capability system in [docs/design.md](docs/design.md).
 
 ### Protection
 

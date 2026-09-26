@@ -100,6 +100,26 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// Map `data`, which must be whole pages, read-only for user mode at
+    /// `va`. Being `'static` and immutable, it is never freed or written, so
+    /// it can be shared rather than copied; this address space doesn't own
+    /// it and won't free it.
+    pub fn map_static(&mut self, va: usize, data: &'static [u8]) -> Result<(), MapError> {
+        let start = VirtAddr::from_ptr(data.as_ptr());
+        if !start.as_usize().is_multiple_of(PAGE_SIZE) || !data.len().is_multiple_of(PAGE_SIZE) {
+            return Err(MapError::Misaligned);
+        }
+        Self::check(va, data.len() / PAGE_SIZE)?;
+        let pa = start.to_phys().ok_or(MapError::OutOfRange)?;
+        self.table.map(
+            va,
+            pa,
+            data.len(),
+            Attributes::normal(Access::USER_READ),
+            false,
+        )
+    }
+
     /// Copy `data` into this address space at `va` (through the kernel's
     /// view of the pages, so it works whatever the pages' user
     /// permissions). The pages must be mapped.

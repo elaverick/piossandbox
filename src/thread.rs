@@ -141,7 +141,7 @@ struct Thread {
     /// `None` for the boot thread, which keeps the boot stack.
     _stack: Option<KernelStack>,
     /// For user threads, the process they belong to.
-    _process: Option<Arc<Process>>,
+    process: Option<Arc<Process>>,
     completion: SharedCompletion,
 }
 
@@ -301,7 +301,7 @@ pub fn init(name: &'static str) {
         unparked: false,
         user_tables: mmu::user_tables(),
         _stack: None,
-        _process: None,
+        process: None,
         completion: Arc::new(SpinLock::new(Completion {
             exit: None,
             waiter: None,
@@ -357,7 +357,7 @@ fn new_thread(
         unparked: false,
         user_tables,
         _stack: Some(stack),
-        _process: process,
+        process,
         completion: completion.clone(),
     });
     JoinHandle { completion }
@@ -424,6 +424,14 @@ impl JoinHandle {
             park();
         }
     }
+}
+
+/// The process the running thread belongs to (`None` for kernel threads).
+pub fn current_process() -> Option<Arc<Process>> {
+    with_scheduler(|s| {
+        let current = s.current;
+        s.thread(current).process.clone()
+    })
 }
 
 /// The running thread.

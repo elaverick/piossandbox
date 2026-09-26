@@ -24,6 +24,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "init"
+version = "0.1.0"
+dependencies = [
+ "libpios",
+ "pios-bootfs",
+]
+
+[[package]]
 name = "libpios"
 version = "0.1.0"
 dependencies = [
@@ -32,6 +40,10 @@ dependencies = [
 
 [[package]]
 name = "pios-abi"
+version = "0.1.0"
+
+[[package]]
+name = "pios-bootfs"
 version = "0.1.0"
 
 [[package]]

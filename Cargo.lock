@@ -7,8 +7,13 @@ name = "pios"
 version = "0.1.0"
 dependencies = [
  "pios-abi",
+ "pios-bootfs",
 ]
 
 [[package]]
 name = "pios-abi"
+version = "0.1.0"
+
+[[package]]
+name = "pios-bootfs"
 version = "0.1.0"

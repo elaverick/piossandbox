@@ -1,12 +1,12 @@
-//! Pass our linker script to the linker, and build the user programs the
-//! kernel carries (until they come from an initramfs).
+//! Pass our linker script to the linker, build the user programs, and pack
+//! them into the boot image the kernel carries (see docs/design.md).
 
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// User programs embedded in the kernel; see src/process.rs.
-const PROGRAMS: &[&str] = &["hello", "usertest", "crashtest", "fptest"];
+/// The user programs in the boot image; see src/bootimage.rs.
+const PROGRAMS: &[&str] = &["init", "hello", "usertest", "crashtest", "fptest"];
 
 fn main() {
     let dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -16,8 +16,8 @@ fn main() {
     build_user_programs(&dir);
 }
 
-/// Build the `user/` workspace for EL0 and copy each program's ELF file to
-/// OUT_DIR, for `include_bytes!`.
+/// Build the `user/` workspace for EL0 and pack the programs into
+/// OUT_DIR/boot.img, for `include_bytes!`.
 fn build_user_programs(dir: &Path) {
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
     let target_dir = out.join("user-target");
@@ -44,14 +44,31 @@ fn build_user_programs(dir: &Path) {
         "building the user programs (in user/) failed"
     );
 
-    for program in PROGRAMS {
-        let built = target_dir
-            .join("aarch64-unknown-none/release")
-            .join(program);
-        std::fs::copy(&built, out.join(format!("{program}.elf")))
-            .unwrap_or_else(|e| panic!("copying {}: {e}", built.display()));
-    }
-    for path in ["user/Cargo.toml", "user/.cargo", "user/libpios", "abi"] {
+    let programs: Vec<(&str, Vec<u8>)> = PROGRAMS
+        .iter()
+        .map(|&program| {
+            let built = target_dir
+                .join("aarch64-unknown-none/release")
+                .join(program);
+            let elf = std::fs::read(&built)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", built.display()));
+            (program, elf)
+        })
+        .collect();
+    let files: Vec<(&str, &[u8])> = programs
+        .iter()
+        .map(|(name, elf)| (*name, elf.as_slice()))
+        .collect();
+    let image = pios_bootfs::build(&files).expect("the programs make a valid boot image");
+    std::fs::write(out.join("boot.img"), image).expect("writing the boot image");
+
+    for path in [
+        "user/Cargo.toml",
+        "user/.cargo",
+        "user/libpios",
+        "abi",
+        "bootfs",
+    ] {
         println!("cargo:rerun-if-changed={path}");
     }
     for program in PROGRAMS {

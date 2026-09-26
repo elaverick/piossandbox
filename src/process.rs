@@ -1,25 +1,35 @@
 //! User programs: loading an ELF executable into a fresh address space and
 //! starting a thread to run it at EL0.
 //!
-//! A process is an address space and, for now, exactly one thread. When the
-//! thread exits or faults, the process ends, and its memory is freed with
-//! the thread.
+//! A process is an address space, a handle table and, for now, exactly one
+//! thread. When the thread exits or faults, the process ends, and its memory
+//! and handles are freed with the thread.
+//!
+//! The kernel starts one process itself, `init`, from the boot image; `init`
+//! starts the rest with the `spawn` system call.
 
 use alloc::sync::Arc;
 use core::fmt;
 
 use crate::addr::PAGE_SIZE;
 use crate::addrspace::{AddressSpace, USER_END, USER_START};
+use crate::bootimage;
 use crate::cache;
 use crate::elf::{Elf, ElfError};
 use crate::exception::{KIND, Syndrome, TrapFrame};
+use crate::handle::HandleTable;
 use crate::paging::{Access, MapError};
+use crate::sync::SpinLock;
 use crate::thread::{self, JoinHandle};
 
 /// The top of every program's stack; the page below the stack is left
 /// unmapped, so overflowing it faults.
 pub const STACK_TOP: usize = 0x40_0000_0000;
 pub const STACK_PAGES: usize = 16;
+
+/// Where `init` finds the boot image (read-only): the argument to its entry
+/// point.
+pub const BOOT_IMAGE_ADDR: usize = 0x10_0000_0000;
 
 /// Why a program stopped.
 #[derive(Clone, Copy, Debug)]
@@ -64,6 +74,8 @@ pub enum LoadError {
     Map(MapError),
     /// No memory for its thread.
     NoThread,
+    /// Not in the boot image.
+    Missing,
 }
 
 impl fmt::Display for LoadError {
@@ -72,6 +84,7 @@ impl fmt::Display for LoadError {
             LoadError::Elf(e) => write!(f, "not a valid program ({e:?})"),
             LoadError::Map(e) => write!(f, "could not set up its memory ({e:?})"),
             LoadError::NoThread => write!(f, "no memory for its thread"),
+            LoadError::Missing => write!(f, "not in the boot image"),
         }
     }
 }
@@ -91,6 +104,7 @@ impl From<MapError> for LoadError {
 /// A user program's process: its address space, shared by its thread(s).
 pub struct Process {
     space: AddressSpace,
+    handles: SpinLock<HandleTable>,
 }
 
 impl Process {
@@ -121,11 +135,19 @@ impl Process {
             STACK_PAGES,
             Access::USER_READ_WRITE,
         )?;
-        Ok((Process { space }, elf.entry() as usize))
+        let process = Process {
+            space,
+            handles: SpinLock::new(HandleTable::new()),
+        };
+        Ok((process, elf.entry() as usize))
     }
 
     pub fn space(&self) -> &AddressSpace {
         &self.space
+    }
+
+    pub fn handles(&self) -> &SpinLock<HandleTable> {
+        &self.handles
     }
 }
 
@@ -135,6 +157,19 @@ impl Process {
 pub fn spawn(name: &'static str, image: &[u8], arg: usize) -> Result<JoinHandle, LoadError> {
     let (process, entry) = Process::load(image)?;
     thread::spawn_user(name, Arc::new(process), entry, STACK_TOP, arg)
+        .map_err(|_| LoadError::NoThread)
+}
+
+/// Start `init` from the boot image, with the whole boot image mapped
+/// read-only at `BOOT_IMAGE_ADDR`.
+pub fn spawn_init() -> Result<JoinHandle, LoadError> {
+    let image = bootimage::image();
+    let init = image.find("init").ok_or(LoadError::Missing)?;
+    let (mut process, entry) = Process::load(init.data)?;
+    process
+        .space
+        .map_static(BOOT_IMAGE_ADDR, image.as_bytes())?;
+    thread::spawn_user("init", Arc::new(process), entry, STACK_TOP, BOOT_IMAGE_ADDR)
         .map_err(|_| LoadError::NoThread)
 }
 
@@ -154,15 +189,7 @@ pub fn user_fault(frame: &TrapFrame, index: u64) -> ! {
     }))
 }
 
-/// The user programs built into the kernel (until there is an initramfs).
-pub mod programs {
-    pub static HELLO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello.elf"));
-    pub static USERTEST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/usertest.elf"));
-    pub static CRASHTEST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/crashtest.elf"));
-    pub static FPTEST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fptest.elf"));
-}
-
-/// Run the built-in test programs, all at once so they take turns:
+/// Run the test programs from the boot image, all at once so they take turns:
 ///
 /// - `usertest` checks the system call interface from user space;
 /// - two `fptest`s each fill the FP/SIMD registers with their own values
@@ -177,14 +204,13 @@ pub fn self_test() -> Result<(), &'static str> {
     let free_before = frame_stats().free;
     let before = thread::stats();
     let ticks_before = tick_count();
-    let start =
-        |name, image, arg| spawn(name, image, arg).map_err(|_| "a test program failed to load");
-    let usertest = start("usertest", programs::USERTEST, 0)?;
-    let fptests = [
-        start("fptest", programs::FPTEST, 1)?,
-        start("fptest", programs::FPTEST, 2)?,
-    ];
-    let crashtest = start("crashtest", programs::CRASHTEST, 0)?;
+    let start = |name, arg| {
+        let image = bootimage::program(name).ok_or("a test program is missing")?;
+        spawn(name, image, arg).map_err(|_| "a test program failed to load")
+    };
+    let usertest = start("usertest", 0)?;
+    let fptests = [start("fptest", 1)?, start("fptest", 2)?];
+    let crashtest = start("crashtest", 0)?;
 
     if !matches!(usertest.join(), Exit::Code(0)) {
         return Err("usertest failed");

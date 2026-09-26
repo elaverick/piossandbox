@@ -9,3 +9,5 @@ publish = false
 path = "lib.rs"
 
 [dependencies]
+pios-abi = { path = "../../abi" }
+pios-bootfs = { path = "../../bootfs", features = ["builder"] }

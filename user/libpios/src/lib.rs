@@ -22,8 +22,8 @@
 use core::fmt;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-pub use pios_abi::Error;
 use pios_abi::call;
+pub use pios_abi::{Error, ExitStatus};
 
 /// Make a system call with up to three arguments.
 fn syscall(number: usize, a0: usize, a1: usize, a2: usize) -> Result<usize, Error> {
@@ -90,6 +90,41 @@ pub fn _set_argument(arg: usize) {
     ARGUMENT.store(arg, Ordering::Relaxed);
 }
 
+/// A process this one started. Dropping it gives up the handle (the child
+/// carries on); [`Child::wait`] waits for it to end.
+pub struct Child {
+    handle: usize,
+}
+
+impl Child {
+    /// The raw handle number.
+    pub fn handle(&self) -> usize {
+        self.handle
+    }
+
+    /// Wait for the child to end, and say how.
+    pub fn wait(self) -> Result<ExitStatus, Error> {
+        let handle = self.handle;
+        // `wait` closes the handle itself.
+        core::mem::forget(self);
+        let raw = syscall(call::WAIT, handle, 0, 0)?;
+        ExitStatus::from_raw(raw).ok_or(Error::InvalidArgument)
+    }
+}
+
+impl Drop for Child {
+    fn drop(&mut self) {
+        let _ = syscall(call::CLOSE, self.handle, 0, 0);
+    }
+}
+
+/// Start a new process running the ELF executable `image`, with `arg` as
+/// its argument.
+pub fn spawn(image: &[u8], arg: usize) -> Result<Child, Error> {
+    let handle = syscall(call::SPAWN, image.as_ptr() as usize, image.len(), arg)?;
+    Ok(Child { handle })
+}
+
 /// Make a raw system call, for testing the kernel's argument checking.
 pub fn raw_syscall(number: usize, a0: usize, a1: usize, a2: usize) -> Result<usize, Error> {
     syscall(number, a0, a1, a2)
@@ -100,7 +135,9 @@ pub struct Console;
 
 impl fmt::Write for Console {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        debug_write(s.as_bytes()).map(|_| ()).map_err(|_| fmt::Error)
+        debug_write(s.as_bytes())
+            .map(|_| ())
+            .map_err(|_| fmt::Error)
     }
 }
 

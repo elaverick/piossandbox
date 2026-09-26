@@ -12,11 +12,11 @@ Done: boot on the Raspberry Pi 4 and 5, serial and HDMI console, exceptions,
 GIC interrupts and a timer tick, MMU and caches, kernel heap, physical page
 allocator, higher-half kernel with W^X mappings, per-process address spaces,
 user mode with an ELF loader and the first system calls, threads with
-preemptive round-robin scheduling (user programs are still built into the
-kernel image).
+preemptive round-robin scheduling, a boot image from which the kernel
+starts `init`, and `init` the rest, with the first handles (to child
+processes).
 
-Next: loading programs from an initramfs, IPC, capabilities, user-space
-drivers, the shell.
+Next: IPC, capabilities, user-space drivers, the shell.
 
 ## Memory layout
 
@@ -124,8 +124,11 @@ and `libpios` both use.
 | 0 | `debug_write(ptr, len)`: write to the kernel console (temporary) |
 | 1 | `exit(code)` |
 | 2 | `yield()` |
+| 3 | `spawn(ptr, len, arg) -> handle` |
+| 4 | `wait(handle) -> exit status` |
+| 5 | `close(handle)` |
 
-IPC calls (send, receive, call, reply) and handle management come next.
+IPC calls (send, receive, call, reply) and more handle management come next.
 
 Every pointer argument is checked with the MMU, from the calling program's
 point of view, before the kernel touches the memory.
@@ -164,9 +167,42 @@ floating point. The kernel itself never uses the FP/SIMD registers, so a
 program's are preserved across system calls, and the scheduler saves and
 restores them when switching threads. A program's entry point gets one
 argument in `x0`, and programs may read the system counter (`CNTVCT_EL0`)
-directly for the time. They reach the board in an initramfs: a
-cpio archive the firmware loads after the kernel (`initramfs ... followkernel`
-in `config.txt`) and describes in the device tree.
+directly for the time. They reach the board in the boot image (see
+[Decisions](#decisions)).
+
+## Start-up and the boot image
+
+The kernel carries a **boot image**: a small read-only archive of the
+programs needed to start the system. At boot, the kernel:
+
+1. finds `init` in the boot image, and nothing else (apart from the test
+   programs its own self-test runs);
+2. loads `init` and maps the whole boot image read-only into its address
+   space, passing its address as `init`'s argument (until there are
+   handles for memory, when it will be a read-only memory handle);
+3. waits for `init`.
+
+`init` reads the boot image itself and starts the other programs with the
+`spawn` system call, which loads an ELF executable from the caller's memory
+into a new process and returns a handle to it. `wait` on that handle waits
+for the process to end and returns how it ended; `close` gives the handle
+up. These are the first handles: each process has a handle table, which
+IPC and capabilities will extend with more kinds of object and with rights.
+Until then, any process may call `spawn`.
+
+The format (`bootfs/`, used by the build to write it and by the kernel and
+`init` to read it; all little-endian):
+
+| Part | Contents |
+| --- | --- |
+| header, 32 bytes | magic `piosboot`, format version (1), number of files, total size |
+| directory, 64 bytes per file | offset and size of the file, and its name (up to 48 bytes of UTF-8) |
+| files | each starting on a 4 KiB page boundary, in directory order |
+
+The image's total size is a whole number of pages too. Page alignment lets
+the image be mapped straight into a process, and a program's read-only
+segments be mapped from it rather than copied (the ELF loader copies them
+for now).
 
 ## Roadmap
 
@@ -174,7 +210,73 @@ in `config.txt`) and describes in the device tree.
 2. ~~Higher-half kernel; per-process address spaces~~
 3. ~~User mode, system call interface, debug print; a first user program~~
 4. ~~Threads, context switching (including FP/SIMD state), preemptive scheduling~~
-5. initramfs (cpio) and an ELF loader; the kernel starts `/init`
+5. ~~Boot image; the kernel starts `init`, which starts the rest (was:
+   initramfs; see [Decisions](#decisions))~~
 6. IPC and capabilities
 7. User-space console server (device memory and interrupt handles)
 8. Process manager and the shell
+
+## Decisions
+
+Decisions worth revisiting, with what was weighed at the time.
+
+### Boot image instead of an initramfs
+
+*Decided 2026-09-26. Revisit once there is a file system.*
+
+**Question.** How do the first programs reach memory at boot, in what
+format, and who unpacks them? Linux's answer (an initramfs: a cpio archive
+the bootloader loads, which the kernel unpacks into a RAM file system)
+suits a kernel that has a file system to unpack into; a microkernel
+doesn't.
+
+**What other systems do.**
+
+| System | Boot-time programs | Who unpacks them |
+| --- | --- | --- |
+| Linux | cpio archive loaded next to the kernel | the kernel, into a RAM file system |
+| seL4 | linked into one boot image with the kernel | the kernel starts one root task with every capability; it starts the rest |
+| Fuchsia | "bootfs" in the boot image: a directory, then page-aligned files | the kernel starts `userboot`, which reads bootfs |
+| QNX | image file system built by `mkifs`, with a boot script | a startup program and the process manager |
+| GNU Hurd, L4Re, NOVA | boot modules: separate files the bootloader loads | the kernel hands them to its first task |
+| Redox, Plan 9 | files built into the kernel image | early user space, or the kernel |
+
+**Decision.** Three separate choices:
+
+- *Who unpacks:* user space, as in seL4 and Fuchsia. The kernel only finds
+  `init` and hands it the whole image; `init` starts everything else. This
+  fits the plan for `init` to start with every capability, keeps archive
+  parsing out of the kernel, and means the kernel's ELF loader serves one
+  program at boot.
+- *Format:* our own, page-aligned, like Fuchsia's bootfs (see
+  [Start-up and the boot image](#start-up-and-the-boot-image)). One small
+  crate both writes it (at build time) and reads it (kernel and `init`),
+  with host tests. Page alignment allows mapping files without copying.
+  Rejected: `tar`, which every system can create and inspect but whose
+  512-byte blocks force copying and whose headers are awkward to parse;
+  `cpio`, with the same problems and no advantage beyond Linux habit.
+- *How it gets into memory:* linked into the kernel image, as in seL4 and
+  Redox. One file on the SD card, so kernel and programs can't get out of
+  step, and it works unchanged in every QEMU set-up we test with. The cost
+  is relinking the kernel when a program changes, which the build does
+  anyway. Rejected for now: a separate file loaded by the firmware
+  (`initramfs <file> followkernel` in `config.txt`, which despite the name
+  loads any file and records where in the device tree's `/chosen` node;
+  QEMU's `-initrd` does the same). That needs the device tree, which some of
+  our QEMU runs don't have, and support in the Pi 5 test model's firmware
+  stub. Since the kernel only passes a memory range to `init`, switching
+  later only changes how the kernel finds that range.
+
+**Revisit when** there is a user-space SD card driver and file system
+server. Then the boot image need only carry what it takes to reach the
+file system (`init`, the console and process manager, the SD and file
+system servers), and everything else, the shell included, can load from
+the card, as QNX and Fuchsia do. At that point, reconsider:
+
+- whether the boot image should move out of the kernel into a separate,
+  firmware-loaded file (for updating programs without rebuilding the
+  kernel);
+- whether a standard format (`tar`) would be worth its costs, for
+  inspecting and editing images with ordinary tools;
+- whether `init` should map read-only segments from the image instead of
+  copying them.

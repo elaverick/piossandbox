@@ -1,5 +1,6 @@
 //! Host unit tests for the parts of the kernel that are plain logic: they
-//! are compiled in unchanged from src/. Run them with `make test-host`. (The
+//! are compiled in unchanged from src/. They also test the crates shared
+//! with user space (`abi/`, `bootfs/`). Run them with `make test-host`. (The
 //! kernel crate is built for the Pi, so these live in their own crate, built
 //! for the host.)
 
@@ -19,7 +20,11 @@ pub mod paging;
 pub mod ranges;
 
 #[cfg(test)]
+mod abi_tests;
+#[cfg(test)]
 mod allocator_tests;
+#[cfg(test)]
+mod bootfs_tests;
 #[cfg(test)]
 mod elf_tests;
 #[cfg(test)]

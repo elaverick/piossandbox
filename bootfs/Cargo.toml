@@ -1,0 +1,12 @@
+[package]
+name = "pios-bootfs"
+version = "0.1.0"
+edition = "2024"
+description = "The pios boot image format: written by the build, read by the kernel and init"
+publish = false
+
+[features]
+# Writing images (for the build script and tests); needs `alloc`.
+builder = []
+
+[dependencies]
