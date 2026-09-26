@@ -8,10 +8,10 @@
 #![no_main]
 
 use libpios::console::{self, CLIENT_BADGE, SETUP_BADGE};
-use libpios::procman;
 use libpios::rights::{DUPLICATE, RECEIVE, SEND, TRANSFER};
 use libpios::{ExitStatus, Handle, Message, println};
-use pios_abi::{BOOT_INFO_MAGIC, BootInfo};
+use libpios::{procman, usb};
+use pios_abi::{BOOT_INFO_MAGIC, BootInfo, UsbInfo};
 use pios_bootfs::BootFs;
 
 libpios::pios_main!(main);
@@ -112,6 +112,28 @@ fn start_procman(image: &BootFs, info: &BootInfo, console: &Handle) -> Option<Ha
     (ok && matches!(done, Ok(reply) if reply.label == procman::OK)).then_some(endpoint)
 }
 
+/// Start a USB driver for `controller`, sending what is typed to
+/// `console`.
+fn start_usb(image: &BootFs, controller: &UsbInfo, number: u64, console: &Handle) -> Option<()> {
+    let endpoint = libpios::endpoint().ok()?;
+    let driver = endpoint.duplicate(SEND | RECEIVE | TRANSFER, 0).ok()?;
+    let program = image.find("usb")?.data;
+    drop(libpios::spawn(program, 0, Some(driver), "").ok()?);
+
+    let setup = endpoint.duplicate(SEND, SETUP_BADGE).ok()?;
+    let input = console
+        .duplicate(SEND | TRANSFER, console::INPUT_BADGE)
+        .ok()?;
+    let messages = console.duplicate(SEND | TRANSFER, CLIENT_BADGE).ok()?;
+    let data = [controller.kind, controller.size, number];
+    let ok = give(&setup, usb::SETUP_CONTROLLER, controller.memory, &data)
+        && give(&setup, usb::SETUP_DMA, controller.dma, &[])
+        && give(&setup, usb::SETUP_INPUT, input.into_raw() as u64, &[])
+        && give(&setup, usb::SETUP_CONSOLE, messages.into_raw() as u64, &[]);
+    let done = setup.call(Message::new(usb::SETUP_DONE, &[]));
+    (ok && matches!(done, Ok(reply) if reply.label == console::OK)).then_some(())
+}
+
 fn main() -> i32 {
     let Some(info) = boot_info() else {
         println!("init: no boot information");
@@ -146,6 +168,16 @@ fn main() -> i32 {
         println!("init: the process manager didn't start");
         return 1;
     };
+    for (number, controller) in info.usb.iter().enumerate() {
+        if controller.memory != 0
+            && start_usb(&image, controller, number as u64, &console).is_none()
+        {
+            println!(
+                "init: the USB driver for controller {} didn't start",
+                number
+            );
+        }
+    }
     let Some(shell) = image.find("shell") else {
         println!("init: there is no shell");
         return 1;

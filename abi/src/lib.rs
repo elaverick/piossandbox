@@ -84,6 +84,12 @@ pub mod call {
     /// (which needs `SEND`) with `badge` every `period_ms` milliseconds
     /// (rounded up to the 10 ms tick) until the handle is closed.
     pub const TIMER: usize = 15;
+    /// `dma_alloc(dma, address, pages) -> bus address`: map `pages` (at
+    /// most 256) fresh, zeroed, physically contiguous pages of memory, not
+    /// cached, at `address` in the caller, for a device to use, and return
+    /// the address the device sees them at. Needs a DMA handle with `MAP`.
+    /// The memory is the caller's, freed when it ends.
+    pub const DMA_ALLOC: usize = 16;
 }
 
 /// The label of a notification: a message from the kernel, not from a
@@ -281,7 +287,28 @@ pub struct BootInfo {
     pub uarts: [UartInfo; 2],
     /// The display the kernel drew on (`memory` 0: none).
     pub display: DisplayInfo,
+    /// USB host controllers (`memory` 0: none).
+    pub usb: [UsbInfo; 2],
 }
+
+/// A USB host controller, with what its driver needs.
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+pub struct UsbInfo {
+    /// `USB_XHCI` or `USB_DWC3`.
+    pub kind: u64,
+    /// Memory handle for its registers, and their size.
+    pub memory: u64,
+    pub size: u64,
+    /// DMA handle for memory it can use.
+    pub dma: u64,
+}
+
+/// A plain xHCI controller (the Pi 4's VL805).
+pub const USB_XHCI: u64 = 1;
+/// A Synopsys DWC3 controller, whose xHCI registers come first and which
+/// has to be put in host mode (the Pi 5's, in RP1).
+pub const USB_DWC3: u64 = 2;
 
 pub const BOOT_INFO_MAGIC: u64 = u64::from_le_bytes(*b"piosinfo");
 

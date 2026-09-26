@@ -7,8 +7,9 @@
 //! one (else it is polled on a timer), and the framebuffer with the text the
 //! kernel left on it, so the screen carries on where the kernel stopped.
 //!
-//! Output goes to every UART and the display. Input from any UART goes into
-//! one buffer, which `READ` requests take from; a reader waits (its reply is
+//! Output goes to every UART and the display. Input from any UART, and
+//! from input drivers such as the USB keyboard's (`INPUT` requests), goes
+//! into one buffer, which `READ` requests take from; a reader waits (its reply is
 //! simply kept) until there is input. While the buffer is full, a UART's
 //! interrupt stays masked and its bytes wait in its FIFO, so nothing is
 //! lost. The UARTs are also emptied while drawing, which is slow, so their
@@ -362,6 +363,19 @@ fn main() -> i32 {
                 let _ = reply.reply(Message::new(OK, &[]));
             }
             (console::CLIENT_BADGE, console::READ) => server.read(reply, message.data[0] as usize),
+            (console::INPUT_BADGE, console::INPUT) => {
+                let mut bytes = [0u8; MAX_BYTES];
+                let count = console::unpack(&message, &mut bytes);
+                // (If the buffer is full, typing is lost, as with a
+                // keyboard buffer: there is no FIFO to leave it in.)
+                for &byte in &bytes[..count] {
+                    if !server.input.is_full() {
+                        server.input.push(byte);
+                    }
+                }
+                let _ = reply.reply(Message::new(OK, &[]));
+                server.serve_readers();
+            }
             _ => {
                 let _ = reply.reply(Message::new(REFUSED, &[]));
             }

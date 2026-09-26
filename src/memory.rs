@@ -59,6 +59,25 @@ pub unsafe fn free_frame(frame: PhysAddr) {
         .free(Frame::from_addr(frame).expect("frames are page-aligned"));
 }
 
+/// `count` zeroed, physically contiguous frames ending at or below `limit`,
+/// for a device to use (DMA). They are also cleaned out of the caches, so
+/// that a non-cacheable mapping of them sees the zeros, and no dirty cache
+/// line can later be written back over what a device wrote.
+pub fn allocate_dma(count: usize, limit: PhysAddr) -> Option<alloc::vec::Vec<OwnedFrame>> {
+    let start = FRAMES
+        .lock()
+        .allocate_contiguous_below(count, PAGE_SIZE, limit)?;
+    let virt = start.to_virt().as_usize();
+    // SAFETY: the frames are ours, and in the linear map.
+    unsafe { core::ptr::write_bytes(virt as *mut u8, 0, count * PAGE_SIZE) };
+    crate::cache::clean_and_invalidate(virt, count * PAGE_SIZE);
+    Some(
+        (0..count)
+            .map(|i| OwnedFrame(Frame::from_addr(start + i * PAGE_SIZE).expect("page-aligned")))
+            .collect(),
+    )
+}
+
 /// Allocate `size` bytes of contiguous RAM for the kernel's own use, for
 /// good (the heap).
 pub fn allocate_permanent(size: usize) -> Option<PhysAddr> {

@@ -14,6 +14,14 @@
  *   - RP1 UART0 (PL011, GPIO 14/15) at 0x1f_0003_0000        -> -serial #2
  *     (its interrupt, an MSI through PCIe on real hardware, is not wired)
  *   - the RP1 PCIe controller's registers at 0x10_0012_0000 (plain RAM)
+ *   - RP1's two USB controllers (DWC3s in host mode, i.e. xHCIs) at
+ *     0x1f_0020_0000 and 0x1f_0030_0000. Like everything in RP1 they reach
+ *     RAM through PCIe,
+ *     where RAM appears at 0x10_0000_0000 + its physical address, so their
+ *     DMA goes through an address space laid out that way. Their
+ *     interrupts, MSIs on real hardware, are not wired: drivers poll. Plug a
+ *     keyboard in with -device usb-kbd (it goes to the first) and type on it
+ *     with the monitor's sendkey
  *   - the VideoCore mailbox at 0x10_7c01_3880, answered by QEMU's existing
  *     BCM2835 property and framebuffer models (the property interface is
  *     the same on every Pi), so -display or screendump shows the "HDMI"
@@ -47,6 +55,7 @@
 #include "hw/display/bcm2835_fb.h"
 #include "hw/nvram/bcm2835_otp.h"
 #include "hw/intc/arm_gic.h"
+#include "hw/usb/hcd-dwc3.h"
 #include "hw/arm/bsa.h"
 #include "sysemu/sysemu.h"
 #include "cpu.h"
@@ -58,6 +67,10 @@
 #define DEBUG_UART_BASE     0x107d001000ULL
 #define RP1_UART0_BASE      0x1f00030000ULL
 #define RP1_PCIE_BASE       0x1000120000ULL
+#define RP1_USB0_BASE       0x1f00200000ULL
+#define RP1_USB1_BASE       0x1f00300000ULL
+/* Where RP1's DMA finds RAM (the PCIe inbound window). */
+#define RP1_DMA_OFFSET      0x1000000000ULL
 #define MBOX_BASE           0x107c013880ULL
 /* QEMU's mailbox device has its registers at offset 0x80. */
 #define MBOX_DEVICE_BASE    (MBOX_BASE - 0x80)
@@ -153,6 +166,30 @@ static DeviceState *raspi5_pios_gic_init(MachineState *ms, DeviceState **cpus)
     return gic;
 }
 
+/* RP1's USB controllers, with their DMA seeing RAM at RP1_DMA_OFFSET. */
+static void raspi5_pios_usb_init(MachineState *ms)
+{
+    static const hwaddr bases[] = { RP1_USB0_BASE, RP1_USB1_BASE };
+    MemoryRegion *dma = g_new(MemoryRegion, 1);
+    MemoryRegion *dma_ram = g_new(MemoryRegion, 1);
+
+    memory_region_init(dma, NULL, "rp1-dma", 2 * RP1_DMA_OFFSET);
+    memory_region_init_alias(dma_ram, NULL, "rp1-dma-ram", ms->ram, 0,
+                             ms->ram_size);
+    memory_region_add_subregion(dma, RP1_DMA_OFFSET, dma_ram);
+
+    for (int i = 0; i < ARRAY_SIZE(bases); i++) {
+        DeviceState *usb = qdev_new(TYPE_USB_DWC3);
+
+        qdev_prop_set_uint32(usb, "intrs", 1);
+        qdev_prop_set_uint32(usb, "slots", 8);
+        object_property_set_link(OBJECT(&USB_DWC3(usb)->sysbus_xhci), "dma",
+                                 OBJECT(dma), &error_abort);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(usb), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(usb), 0, bases[i]);
+    }
+}
+
 static void raspi5_pios_init(MachineState *ms)
 {
     MemoryRegion *sysmem = get_system_memory();
@@ -181,6 +218,8 @@ static void raspi5_pios_init(MachineState *ms)
 
     memory_region_init_ram(pcie, NULL, "rp1-pcie-regs", 0x10000, &error_fatal);
     memory_region_add_subregion(sysmem, RP1_PCIE_BASE, pcie);
+
+    raspi5_pios_usb_init(ms);
 
     raspi5_pios_videocore_init(ms);
 

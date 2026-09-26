@@ -59,6 +59,28 @@ impl Model {
     }
 }
 
+/// A USB host controller, for the USB driver.
+#[derive(Clone, Copy)]
+pub struct UsbController {
+    /// `pios_abi::USB_XHCI` or `USB_DWC3`.
+    pub kind: u64,
+    pub base: PhysAddr,
+    pub size: usize,
+    /// How the controller reaches memory (see `device::Dma`).
+    pub dma_offset: u64,
+    pub dma_limit: PhysAddr,
+}
+
+impl Model {
+    /// The USB host controllers that are there and usable.
+    pub fn usb_controllers(self) -> [Option<UsbController>; 2] {
+        match self {
+            Model::Pi4 => [None, None],
+            Model::Pi5 => pi5::usb_controllers(),
+        }
+    }
+}
+
 /// A UART that was added to the console, for the boot banner.
 pub struct ConsoleUart {
     pub name: &'static str,
@@ -204,6 +226,25 @@ mod pi5 {
         };
 
         [Some((debug, debug_info)), rp1]
+    }
+
+    /// RP1's two USB controllers, DWC3s in host mode, at RP1 offsets
+    /// 0x200000 and 0x300000 ("usb@200000" and "usb@300000" in the device
+    /// tree). RP1 reaches RAM through PCIe, where it appears at
+    /// 0x10_0000_0000 + its physical address (the device tree's dma-ranges).
+    pub fn usb_controllers() -> [Option<UsbController>; 2] {
+        if !rp1_link_up() {
+            return [None, None];
+        }
+        [0x1F_0020_0000, 0x1F_0030_0000].map(|base| {
+            Some(UsbController {
+                kind: pios_abi::USB_DWC3,
+                base: PhysAddr::new(base),
+                size: 0x10_0000,
+                dma_offset: 0x10_0000_0000,
+                dma_limit: PhysAddr::new(usize::MAX),
+            })
+        })
     }
 
     fn rp1_link_up() -> bool {

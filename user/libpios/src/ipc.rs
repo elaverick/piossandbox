@@ -89,6 +89,12 @@ impl Handle {
         syscall(call::INTERRUPT_BIND, self.0, endpoint.0, badge as usize).map(|_| ())
     }
 
+    /// Map `pages` fresh pages of memory for a device's DMA at `address`
+    /// (through this DMA handle), uncached; returns their bus address.
+    pub fn dma_alloc(&self, address: usize, pages: usize) -> Result<u64, Error> {
+        syscall(call::DMA_ALLOC, self.0, address, pages).map(|bus| bus as u64)
+    }
+
     /// This interrupt has been dealt with: unmask it.
     pub fn acknowledge_interrupt(&self) -> Result<(), Error> {
         syscall(call::INTERRUPT_ACK, self.0, 0, 0).map(|_| ())

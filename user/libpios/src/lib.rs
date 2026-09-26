@@ -28,6 +28,7 @@ pub use pios_abi::{Error, ExitStatus, MESSAGE_WORDS, rights};
 pub mod console;
 mod ipc;
 pub mod procman;
+pub mod usb;
 use ipc::close_raw;
 pub use ipc::{Handle, Message, Received, Reply, endpoint, timer};
 
@@ -245,9 +246,54 @@ impl fmt::Write for Console {
     }
 }
 
+/// Formatted output collected before it is written, so a `println!` goes
+/// out in one piece (up to the buffer's size) and doesn't get mixed up with
+/// other programs' output a word at a time.
+struct Buffered {
+    bytes: [u8; 256],
+    len: usize,
+}
+
+impl Buffered {
+    fn flush(&mut self) -> fmt::Result {
+        // (Always valid UTF-8: only whole `str`s are split, at char
+        // boundaries.)
+        let text = core::str::from_utf8(&self.bytes[..self.len]).map_err(|_| fmt::Error)?;
+        self.len = 0;
+        fmt::Write::write_str(&mut Console, text)
+    }
+}
+
+impl fmt::Write for Buffered {
+    fn write_str(&mut self, mut s: &str) -> fmt::Result {
+        while !s.is_empty() {
+            if self.len == self.bytes.len() {
+                self.flush()?;
+            }
+            let mut take = s.len().min(self.bytes.len() - self.len);
+            while !s.is_char_boundary(take) {
+                take -= 1;
+            }
+            if take == 0 {
+                self.flush()?;
+                continue;
+            }
+            self.bytes[self.len..self.len + take].copy_from_slice(&s.as_bytes()[..take]);
+            self.len += take;
+            s = &s[take..];
+        }
+        Ok(())
+    }
+}
+
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
-    let _ = fmt::Write::write_fmt(&mut Console, args);
+    let mut buffered = Buffered {
+        bytes: [0; 256],
+        len: 0,
+    };
+    let _ = fmt::Write::write_fmt(&mut buffered, args);
+    let _ = buffered.flush();
 }
 
 #[macro_export]

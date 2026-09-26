@@ -2,7 +2,7 @@
 # in the kernel image (until programs are loaded from an initramfs).
 [workspace]
 members = [
-    "libpios", "init", "console", "procman", "shell", "hello",
+    "libpios", "init", "console", "procman", "shell", "usb", "hello",
     "usertest", "crashtest", "fptest", "ipctest",
 ]
 resolver = "3"

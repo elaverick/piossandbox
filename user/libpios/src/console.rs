@@ -8,6 +8,7 @@
 //! | --- | --- | --- |
 //! | `WRITE` | byte count, bytes | label `OK` |
 //! | `READ` | the most bytes wanted | label `OK`, byte count (at least 1), bytes; waits until there is input |
+//! | `INPUT` | byte count, bytes (from an input driver, such as a keyboard's; needs `INPUT_BADGE`) | label `OK` |
 //!
 //! `init` sets the server up before anything else, through a handle with
 //! `SETUP_BADGE`, passing it the hardware the kernel handed over:
@@ -29,6 +30,7 @@ use crate::{Handle, Message};
 
 pub const WRITE: u64 = 1;
 pub const READ: u64 = 2;
+pub const INPUT: u64 = 3;
 pub const SETUP_UART: u64 = 100;
 pub const SETUP_UART_INTERRUPT: u64 = 101;
 pub const SETUP_DISPLAY: u64 = 102;
@@ -42,6 +44,8 @@ pub const REFUSED: u64 = 1;
 /// Badges the server tells its callers apart by.
 pub const SETUP_BADGE: u64 = 1;
 pub const CLIENT_BADGE: u64 = 2;
+/// Input drivers (keyboards) send typed bytes with this badge.
+pub const INPUT_BADGE: u64 = 3;
 
 /// The most bytes in one message.
 pub const MAX_BYTES: usize = (MESSAGE_WORDS - 1) * 8;
@@ -92,6 +96,18 @@ pub fn write(bytes: &[u8]) -> Result<(), Error> {
     let console = console()?;
     for chunk in bytes.chunks(MAX_BYTES) {
         let reply = console.call(pack(WRITE, chunk))?;
+        if reply.label != OK {
+            return Err(Error::InvalidArgument);
+        }
+    }
+    Ok(())
+}
+
+/// Give the console typed input (`bytes`, of any length), through
+/// `console`, a handle with `INPUT_BADGE`.
+pub fn send_input(console: &Handle, bytes: &[u8]) -> Result<(), Error> {
+    for chunk in bytes.chunks(MAX_BYTES) {
+        let reply = console.call(pack(INPUT, chunk))?;
         if reply.label != OK {
             return Err(Error::InvalidArgument);
         }

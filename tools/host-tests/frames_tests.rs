@@ -64,6 +64,22 @@ fn contiguous_allocations_are_aligned_and_skip_used_frames() {
 }
 
 #[test]
+fn contiguous_allocations_respect_a_limit() {
+    let mut a = FrameAllocator::new();
+    a.add_region(p(0x10_0000), 16, bitmap(16)).unwrap(); // 1 MiB .. 1 MiB + 64 KiB
+    a.add_region(p(0x100_0000), 16, bitmap(16)).unwrap(); // 16 MiB .. + 64 KiB
+    let limit = p(0x10_0000 + 8 * PAGE_SIZE);
+    assert_eq!(a.allocate_contiguous_below(9, PAGE_SIZE, limit), None, "would end past the limit");
+    let run = a.allocate_contiguous_below(8, PAGE_SIZE, limit).unwrap();
+    assert_eq!(run, p(0x10_0000));
+    assert_eq!(a.allocate_contiguous_below(1, PAGE_SIZE, limit), None, "nothing left below it");
+    assert_eq!(a.allocate_contiguous_below(1, PAGE_SIZE, p(0x10_0000)), None);
+    // Without a limit, the rest of the first region is found first.
+    assert_eq!(a.allocate_contiguous(8, PAGE_SIZE), Some(p(0x10_0000 + 8 * PAGE_SIZE)));
+    assert_eq!(a.allocate_contiguous_below(16, PAGE_SIZE, p(usize::MAX)), Some(p(0x100_0000)));
+}
+
+#[test]
 #[should_panic(expected = "double free")]
 fn double_free_panics() {
     let mut a = FrameAllocator::new();

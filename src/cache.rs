@@ -42,6 +42,13 @@ pub fn invalidate(start: usize, len: usize) {
     for_each_line!("ivac", start, len);
 }
 
+/// Write any cached changes in the range out to memory and discard the
+/// cached copies, so neither a later write-back nor a stale read can get in
+/// the way of a device using the memory.
+pub fn clean_and_invalidate(start: usize, len: usize) {
+    for_each_line!("civac", start, len);
+}
+
 /// Write any cached changes in the range out as far as the point where
 /// instruction fetches see them (for code written through the data cache).
 pub fn clean_to_unification(start: usize, len: usize) {

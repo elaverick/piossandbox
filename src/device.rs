@@ -77,6 +77,23 @@ impl Memory {
     }
 }
 
+/// The right to allocate memory for a device's DMA: physically contiguous,
+/// below `limit` (the highest address the device can reach), mapped
+/// non-cacheable, and at `offset` from its physical address on the device's
+/// bus.
+///
+/// Whoever holds one can have the device read and write that memory, and
+/// with no IOMMU, a device can be told to reach any memory. So only drivers
+/// get one: it is as powerful as the device it goes with.
+#[derive(Clone, Copy)]
+pub struct Dma {
+    pub offset: u64,
+    pub limit: PhysAddr,
+}
+
+/// The most pages one `dma_alloc` may ask for (1 MiB).
+pub const DMA_MAX_PAGES: usize = 256;
+
 /// A copy of `data` in whole pages of kernel memory that is never freed,
 /// for sharing read-only with user space.
 pub fn leak_pages(data: &[u8]) -> &'static [u8] {
@@ -221,5 +238,6 @@ pub fn tick() {
     }
 }
 
-/// What handles to devices allow.
+/// What handles to devices allow: memory and DMA handles, mapping; all of
+/// them, passing on.
 pub const MEMORY_RIGHTS: usize = rights::MAP | rights::TRANSFER;

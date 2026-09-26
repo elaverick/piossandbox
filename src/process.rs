@@ -11,13 +11,14 @@
 use alloc::sync::Arc;
 use core::fmt;
 
-use pios_abi::{BOOT_INFO_MAGIC, BootInfo, DisplayInfo};
+use pios_abi::{BOOT_INFO_MAGIC, BootInfo, DisplayInfo, UsbInfo};
 
 use crate::addr::PAGE_SIZE;
 use crate::addrspace::{AddressSpace, USER_END, USER_START};
+use crate::board::UsbController;
 use crate::bootimage;
 use crate::cache;
-use crate::device::{Interrupt, Memory, leak_pages};
+use crate::device::{Dma, Interrupt, Memory, leak_pages};
 use crate::elf::{Elf, ElfError};
 use crate::exception::{KIND, Syndrome, TrapFrame};
 use crate::handle::{Handle, HandleTable};
@@ -192,10 +193,10 @@ pub fn spawn_from_boot_image(name: &'static str) -> Result<JoinHandle, LoadError
 }
 
 /// Start `init`: with the boot image mapped as for `spawn_from_boot_image`,
-/// and handles to the console UARTs and the display, which the kernel stops
-/// using. What they are is described in a `BootInfo` page mapped read-only
+/// handles to the console UARTs and the display, which the kernel stops
+/// using, and to the `usb` controllers. What they are is described in a `BootInfo` page mapped read-only
 /// at `BOOT_INFO_ADDR`, which is `init`'s argument.
-pub fn spawn_init() -> Result<JoinHandle, LoadError> {
+pub fn spawn_init(usb: [Option<UsbController>; 2]) -> Result<JoinHandle, LoadError> {
     let image = bootimage::image();
     let program = image.find("init").ok_or(LoadError::Missing)?;
     let (process, entry) = Process::load(program.data)?;
@@ -248,6 +249,21 @@ pub fn spawn_init() -> Result<JoinHandle, LoadError> {
                 rows: display.rows as u64,
                 cursor_x: display.cursor.0 as u64,
                 cursor_y: display.cursor.1 as u64,
+            };
+        }
+
+        for (slot, usb) in info.usb.iter_mut().zip(usb.iter().flatten()) {
+            // SAFETY: a USB controller's registers are device memory.
+            let memory = unsafe { Memory::device(usb.base, usb.size) };
+            let dma = Dma {
+                offset: usb.dma_offset,
+                limit: usb.dma_limit,
+            };
+            *slot = UsbInfo {
+                kind: usb.kind,
+                size: memory.size() as u64,
+                memory: give(Handle::Memory(memory)),
+                dma: give(Handle::Dma(dma)),
             };
         }
 

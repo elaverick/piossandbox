@@ -86,6 +86,37 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// Map `frames` (which this address space then owns, and frees with
+    /// it) at `va` with `attributes`, which must be for user access. On
+    /// error nothing is mapped, and the frames are freed.
+    pub fn map_frames(
+        &mut self,
+        va: usize,
+        frames: alloc::vec::Vec<OwnedFrame>,
+        attributes: Attributes,
+    ) -> Result<(), MapError> {
+        assert!(attributes.access().is_user());
+        Self::check(va, frames.len())?;
+        for (i, frame) in frames.iter().enumerate() {
+            let at = va + i * PAGE_SIZE;
+            if let Err(e) = self
+                .table
+                .map(at, frame.addr(), PAGE_SIZE, attributes, false)
+            {
+                if i > 0 {
+                    self.table
+                        .unmap(va, i * PAGE_SIZE)
+                        .expect("the pages just mapped are there");
+                }
+                return Err(e);
+            }
+        }
+        for (i, frame) in frames.into_iter().enumerate() {
+            self.pages.insert(va + i * PAGE_SIZE, frame);
+        }
+        Ok(())
+    }
+
     /// Unmap `pages` pages at `va` and free their memory. All must be
     /// mapped; if any aren't, nothing changes.
     pub fn free(&mut self, va: usize, pages: usize) -> Result<(), MapError> {

@@ -246,7 +246,7 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     // console UARTs' input and the display are its from now on; the kernel
     // only writes its own messages to the UARTs.
     println!();
-    match process::spawn_init().map(thread::JoinHandle::join) {
+    match process::spawn_init(model.usb_controllers()).map(thread::JoinHandle::join) {
         Ok(process::Exit::Code(code)) => println!("[init exited with code {}]", code),
         Ok(process::Exit::Fault(fault)) => println!("[init was stopped: {}]", fault),
         Err(e) => println!("[init could not be started: {}]", e),

@@ -9,7 +9,7 @@ use alloc::collections::BTreeMap;
 
 use pios_abi::rights;
 
-use crate::device::{Interrupt, MEMORY_RIGHTS, Memory, Timer};
+use crate::device::{Dma, Interrupt, MEMORY_RIGHTS, Memory, Timer};
 use crate::ipc::{EndpointRef, ReplyCap};
 use crate::thread::JoinHandle;
 
@@ -28,6 +28,8 @@ pub enum Handle {
     Memory(Memory),
     /// Ownership of an interrupt.
     Interrupt(Interrupt),
+    /// The right to allocate memory for a device's DMA.
+    Dma(Dma),
     /// A periodic notification; closing the handle stops it (which is all
     /// the handle is for: holding it keeps the timer going).
     Timer(#[allow(dead_code)] Timer),
@@ -40,7 +42,7 @@ impl Handle {
             Handle::Process(_) => rights::WAIT | rights::TRANSFER,
             Handle::Endpoint(endpoint) => endpoint.rights(),
             Handle::Reply(_) | Handle::Interrupt(_) | Handle::Timer(_) => rights::TRANSFER,
-            Handle::Memory(_) => MEMORY_RIGHTS,
+            Handle::Memory(_) | Handle::Dma(_) => MEMORY_RIGHTS,
         }
     }
 

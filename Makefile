@@ -5,7 +5,8 @@
 #   make test       boot it in QEMU's Pi 4 model and check the serial and
 #                   HDMI output
 #   make run-pi5    boot it in the raspi5-pios model (see tools/qemu-raspi5)
-#   make test-pi5   test it on the raspi5-pios model: both UARTs and HDMI
+#   make test-pi5   test it on the raspi5-pios model: both UARTs, HDMI and a
+#                   USB keyboard
 #   make sdcard     assemble a bootable SD card directory in build/sdcard
 #   make test-host  run the host unit tests (the heap allocator)
 #   make disasm     disassemble the kernel
@@ -59,6 +60,7 @@ test-pi5: $(IMG)
 	QEMU="$(QEMU_PI5)" MACHINE=raspi5-pios CONSOLE=0 DTB="$(DTB)" ./scripts/qemu-test.sh $(IMG)
 	QEMU="$(QEMU_PI5)" MACHINE=raspi5-pios CONSOLE=1 DTB="$(DTB)" ./scripts/qemu-test.sh $(IMG)
 	QEMU="$(QEMU_PI5)" MACHINE=raspi5-pios ./scripts/qemu-screen-test.sh $(IMG)
+	QEMU="$(QEMU_PI5)" ./scripts/qemu-usb-test.sh $(IMG)
 
 HOST := $(shell rustc -vV | sed -n 's/^host: //p')
 test-host:

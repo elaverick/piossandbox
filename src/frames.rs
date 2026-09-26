@@ -176,12 +176,29 @@ impl<'a> FrameAllocator<'a> {
     /// Allocate `count` physically contiguous frames starting at a multiple
     /// of `align` bytes (a power of two, at least a page).
     pub fn allocate_contiguous(&mut self, count: usize, align: usize) -> Option<PhysAddr> {
+        self.allocate_contiguous_below(count, align, PhysAddr::new(usize::MAX))
+    }
+
+    /// Like `allocate_contiguous`, but ending at or below `limit` (for
+    /// devices that can only reach part of memory).
+    pub fn allocate_contiguous_below(
+        &mut self,
+        count: usize,
+        align: usize,
+        limit: PhysAddr,
+    ) -> Option<PhysAddr> {
         if count == 0 || !align.is_power_of_two() || align < PAGE_SIZE {
             return None;
         }
         for region in self.regions.iter_mut().flatten() {
             let mut first = (region.start.align_up(align) - region.start) / PAGE_SIZE;
-            while first + count <= region.frames {
+            // The frames that end at or below the limit.
+            let frames = if limit <= region.start {
+                0
+            } else {
+                region.frames.min((limit - region.start) / PAGE_SIZE)
+            };
+            while first + count <= frames {
                 match (first..first + count).find(|&i| region.is_used(i)) {
                     None => {
                         for i in first..first + count {

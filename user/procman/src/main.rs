@@ -26,7 +26,7 @@ libpios::pios_main!(main);
 const BOOT_IMAGE_ADDR: usize = 0x30_0000_0000;
 
 /// Programs not for running by name.
-const SYSTEM: [&str; 5] = ["init", "console", "procman", "shell", "ipctest"];
+const SYSTEM: [&str; 6] = ["init", "console", "procman", "shell", "usb", "ipctest"];
 
 /// The programs that can be run, in name order.
 fn programs(image: &BootFs<'static>) -> impl Iterator<Item = pios_bootfs::File<'static>> {

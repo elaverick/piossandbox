@@ -7,7 +7,16 @@ use std::process::Command;
 
 /// The user programs in the boot image; see src/bootimage.rs.
 const PROGRAMS: &[&str] = &[
-    "init", "console", "procman", "shell", "hello", "usertest", "crashtest", "fptest", "ipctest",
+    "init",
+    "console",
+    "procman",
+    "shell",
+    "usb",
+    "hello",
+    "usertest",
+    "crashtest",
+    "fptest",
+    "ipctest",
 ];
 
 fn main() {

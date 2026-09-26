@@ -89,6 +89,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "usb"
+version = "0.1.0"
+dependencies = [
+ "libpios",
+ "pios-abi",
+]
+
+[[package]]
 name = "usertest"
 version = "0.1.0"
 dependencies = [

@@ -10,11 +10,12 @@ use alloc::vec::Vec;
 
 use pios_abi::{Error, ExitStatus, MESSAGE_SIZE, Message, call, rights};
 
-use crate::device::Timer;
+use crate::device::{DMA_MAX_PAGES, Timer};
 use crate::exception::TrapFrame;
 use crate::handle::Handle;
 use crate::ipc::{self, Endpoint, EndpointRef, ReplyCap};
 use crate::paging::MapError;
+use crate::paging::{Access, Attributes};
 use crate::process::{self, Exit, LoadError, Process};
 use crate::user::{UserSlice, UserSliceMut};
 
@@ -45,6 +46,7 @@ pub fn handle(frame: &mut TrapFrame) {
         call::INTERRUPT_BIND => interrupt_bind(args[0], args[1], args[2] as u64),
         call::INTERRUPT_ACK => interrupt_ack(args[0]),
         call::TIMER => timer(args[0], args[1] as u64, args[2] as u64),
+        call::DMA_ALLOC => dma_alloc(args[0], args[1], args[2]),
         _ => Err(Error::NoSuchCall),
     };
     frame.x[0] = match result {
@@ -391,4 +393,26 @@ fn timer(endpoint: usize, badge: u64, period_ms: u64) -> Result<usize, Error> {
         &caller,
         Handle::Timer(Timer::start(endpoint, badge, period_ms)),
     )
+}
+
+/// `dma_alloc(dma, address, pages)`: memory for a device, mapped
+/// non-cacheable; returns its bus address.
+fn dma_alloc(number: usize, va: usize, pages: usize) -> Result<usize, Error> {
+    let caller = caller();
+    let dma = match caller.handles().lock().get(number) {
+        Some(Handle::Dma(dma)) => *dma,
+        _ => return Err(Error::BadHandle),
+    };
+    if pages == 0 || pages > DMA_MAX_PAGES {
+        return Err(Error::InvalidArgument);
+    }
+    let frames = crate::memory::allocate_dma(pages, dma.limit).ok_or(Error::OutOfMemory)?;
+    let physical = frames[0].addr().as_usize() as u64;
+    let attributes = Attributes::non_cacheable(Access::USER_READ_WRITE);
+    let result = caller.space().lock().map_frames(va, frames, attributes);
+    match result {
+        Ok(()) => Ok((physical + dma.offset) as usize),
+        Err(MapError::OutOfMemory) => Err(Error::OutOfMemory),
+        Err(_) => Err(Error::InvalidArgument),
+    }
 }

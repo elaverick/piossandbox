@@ -124,7 +124,7 @@ hold up to 1024. The rights so far (`pios_abi::rights`):
 | `DUPLICATE` | making copies (with the same or fewer rights) | endpoint handles |
 | `TRANSFER` | passing the handle on, in a message or to `spawn` | every kind |
 | `WAIT` | waiting for the process to end | process handles |
-| `MAP` | mapping the memory | memory handles |
+| `MAP` | mapping the memory; allocating DMA memory | memory and DMA handles |
 
 `endpoint()` returns a handle with the first four. `spawn` can give the new
 process one handle, which is how a parent sets up the first channel to a
@@ -171,8 +171,18 @@ without a console handle (the kernel's own test programs, and anything
 that fails before connecting). It can go once those have a console too.
 
 Kernel objects so far: endpoints, reply handles, processes, memory (device
-registers, a framebuffer, or read-only kernel data), interrupts and
-timers.
+registers, a framebuffer, or read-only kernel data), interrupts, timers,
+and DMA handles.
+
+A **DMA handle** lets a driver allocate memory for its device: physically
+contiguous, zeroed, uncached, below the highest address the device can
+reach, returned with the address the device sees it at (RP1, on the Pi 5,
+sees RAM through PCIe at an offset). The memory belongs to the driver's
+address space. There is no IOMMU on either board, so a device can be told
+to read or write any memory, and a DMA handle is as powerful as the device
+it goes with: only drivers get one. If a driver dies while its device is
+still using its memory, the memory is freed and may be reused under the
+device's feet; stopping the device first is the driver's job for now.
 
 ## System calls
 
@@ -199,6 +209,7 @@ and `libpios` both use.
 | 13 | `interrupt_bind(interrupt, endpoint, badge)` |
 | 14 | `interrupt_ack(interrupt)` |
 | 15 | `timer(endpoint, badge, period_ms) -> handle` |
+| 16 | `dma_alloc(dma, address, pages) -> bus address` |
 
 The details of each are in the `pios-abi` crate.
 
@@ -320,7 +331,9 @@ Next, roughly in order:
 11. An SD card driver and a FAT file system server, so programs can come
     from the card (and the boot image shrinks; see [Decisions](#decisions))
 12. The other cores
-13. USB (behind PCIe on both boards) for a keyboard
+13. USB (behind PCIe on both boards) for a keyboard: done for the Pi 5
+    (RP1's xHCIs, root ports only, polled); the Pi 4's VL805 needs the
+    BCM2711's PCIe controller brought up first
 
 ## Decisions
 
