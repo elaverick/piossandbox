@@ -62,7 +62,7 @@ test-pi5: $(IMG)
 
 HOST := $(shell rustc -vV | sed -n 's/^host: //p')
 test-host:
-	cargo test --manifest-path tools/heap-test/Cargo.toml --target $(HOST)
+	cargo test --manifest-path tools/host-tests/Cargo.toml --target $(HOST)
 
 sdcard: $(IMG)
 	./scripts/make-sdcard.sh $(IMG) build/sdcard

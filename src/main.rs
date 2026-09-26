@@ -6,33 +6,51 @@
 
 #![no_std]
 #![no_main]
+// Every unsafe operation needs its own `unsafe` block, even inside an
+// `unsafe fn`, and every `unsafe` block a `// SAFETY:` comment saying why it
+// is sound.
+#![deny(unsafe_op_in_unsafe_fn)]
+#![deny(clippy::undocumented_unsafe_blocks)]
 // Register maps read better with explicit `BASE + 0x00` offsets.
 #![allow(clippy::identity_op)]
 
 extern crate alloc;
 
+#[allow(dead_code)] // shared with the host tests, which use more of it
+mod addr;
+mod addrspace;
+#[allow(dead_code)] // shared with the host tests, which use more of it
 mod allocator;
 mod board;
 mod cache;
 mod console;
 mod cpu;
 mod exception;
+#[allow(dead_code)] // shared with the host tests, which use more of it
 mod fdt;
 mod font;
 mod framebuffer;
+#[allow(dead_code)] // shared with the host tests, which use more of it
+mod frames;
 mod gic;
 mod gpio;
 mod heap;
 mod irq;
 mod mailbox;
+mod memory;
 mod mmio;
 mod mmu;
+#[allow(dead_code)] // shared with the host tests, which use more of it
+mod paging;
+#[allow(dead_code)] // shared with the host tests, which use more of it
+mod ranges;
 mod sync;
 mod timer;
 mod uart;
 
 use core::panic::PanicInfo;
 
+use addr::PhysAddr;
 use board::Model;
 
 // The entry point, `_start`, and the exception vectors live in assembly.
@@ -42,7 +60,6 @@ core::arch::global_asm!(include_str!("boot.s"));
 
 unsafe extern "C" {
     static __kernel_start: u8;
-    static __kernel_end: u8;
 }
 
 /// Called from `_start` on the primary core with the device tree address.
@@ -54,7 +71,35 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
 
     let uarts = board::init_console(model);
     let mailbox = model.mailbox();
-    let display = framebuffer::init(mailbox);
+
+    // What the firmware can tell us about memory and the display.
+    let firmware_range = |tag| {
+        let mut value = [0u32; 2];
+        mailbox
+            .property(tag, &mut value)
+            .map(|()| (PhysAddr::new(value[0] as usize), value[1] as usize))
+    };
+    let arm_memory = firmware_range(mailbox::TAG_GET_ARM_MEMORY);
+    let vc_memory = firmware_range(mailbox::TAG_GET_VC_MEMORY);
+    let displays = framebuffer::count_displays(mailbox);
+    let framebuffer = framebuffer::FrameBuffer::allocate(mailbox);
+    let device_tree = device_tree(PhysAddr::new(dtb));
+
+    // Physical memory and the kernel's own memory map; then the heap.
+    let boot = memory::BootInfo {
+        fdt: device_tree,
+        fdt_range: device_tree.map(|fdt| (PhysAddr::new(dtb), fdt.size())),
+        arm_memory,
+        vc_memory,
+        framebuffer: framebuffer.map(|(fb, _)| fb.memory()),
+        devices: model.devices(),
+    };
+    let memory_report = match memory::init(&boot) {
+        Ok(report) => report,
+        Err(e) => panic!("memory setup failed: {e}"),
+    };
+    let heap_region = heap::init();
+    let display = framebuffer.and_then(|(fb, _)| framebuffer::start(fb, displays));
 
     // Interrupts: the timer tick and interrupt-driven serial input.
     let (gicd, gicc) = model.gic();
@@ -63,17 +108,6 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     timer::start_tick();
     console::enable_interrupts();
     irq::enable();
-
-    // The heap: RAM after the kernel, up to the end of the ARM's share.
-    let device_tree = fdt::Fdt::at(dtb);
-    let mut memory = [0u32; 2];
-    let arm_memory = mailbox
-        .property(mailbox::TAG_GET_ARM_MEMORY, &mut memory)
-        .map(|()| {
-            let (base, size) = (memory[0] as usize, memory[1] as usize);
-            (base, base + size)
-        });
-    let heap_region = heap::init(arm_memory.map(|(_, end)| end), device_tree.as_ref());
 
     let self_test = self_test();
 
@@ -93,9 +127,10 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
         Some(fdt) => println!("  device tree     : {:#010x} ({} bytes)", dtb, fdt.size()),
         None => println!("  device tree     : {:#010x} (not valid)", dtb),
     }
+    let (image_start, image_end) = mmu::kernel_image();
     println!(
-        "  kernel image    : {:#010x} - {:#010x}",
-        &raw const __kernel_start as usize, &raw const __kernel_end as usize
+        "  kernel image    : {:#010x} - {:#010x}, at {:#x}",
+        image_start, image_end, &raw const __kernel_start as usize
     );
     for uart in uarts.iter().flatten() {
         match uart.clock_hz {
@@ -115,9 +150,20 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
             None => println!(", polled"),
         }
     }
+    let frames = memory::frame_stats();
     println!(
-        "  memory          : MMU and caches on; RAM write-back cached, framebuffer write-combining"
+        "  RAM             : {} MiB in {} range(s), from the {}; {} of {} MiB free in 4 KiB pages",
+        memory_report.ram.total() >> 20,
+        memory_report.ram.len(),
+        if memory_report.from_device_tree {
+            "device tree"
+        } else {
+            "firmware"
+        },
+        (frames.free * addr::PAGE_SIZE) >> 20,
+        (frames.total * addr::PAGE_SIZE) >> 20
     );
+    println!("  memory map      : kernel in the upper half, code read-only, data never executable");
     println!(
         "  interrupts      : GIC-400 at {:#x} ({} IDs), {} Hz timer tick",
         gicd,
@@ -125,18 +171,13 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
         timer::TICK_HZ
     );
     match heap_region {
-        Some((start, end)) => println!(
-            "  heap            : {:#010x} - {:#010x} ({} MiB)",
-            start,
-            end,
-            (end - start) >> 20
-        ),
-        None => println!("  heap            : none (no free memory found)"),
+        Some((start, size)) => println!("  heap            : {} MiB at {:#x}", size >> 20, start),
+        None => println!("  heap            : none (not enough free memory)"),
     }
     match self_test {
-        Ok(()) => {
-            println!("  self-test       : svc, brk, timer interrupts, MMU, atomics and heap OK")
-        }
+        Ok(()) => println!(
+            "  self-test       : svc, brk, timer interrupts, MMU, atomics, heap and address spaces OK"
+        ),
         Err(e) => println!("  self-test       : FAILED: {}", e),
     }
 
@@ -161,12 +202,12 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
         Some(()) => println!("  board revision  : {:#08x}", revision[0]),
         None => println!("  board revision  : (no answer from the firmware)"),
     }
-    if let Some((start, end)) = arm_memory {
+    if let Some((start, size)) = arm_memory {
         println!(
             "  ARM memory      : {:#010x} - {:#010x} ({} MiB)",
             start,
-            end,
-            (end - start) >> 20
+            start + size,
+            size >> 20
         );
     }
 
@@ -239,7 +280,29 @@ fn self_test() -> Result<(), &'static str> {
     }
 
     heap::self_test()?;
+    addrspace::self_test()?;
     Ok(())
+}
+
+/// The device tree the firmware left at `phys`, if there is a valid one
+/// within the boot map (the first GiB of RAM).
+fn device_tree(phys: PhysAddr) -> Option<fdt::Fdt<'static>> {
+    const BOOT_MAP_END: usize = 1 << 30;
+    let p = phys.as_usize();
+    if p == 0 || !p.is_multiple_of(8) || p + 8 > BOOT_MAP_END {
+        return None;
+    }
+    // SAFETY: the first 8 bytes are within the boot map's RAM.
+    let header = unsafe { core::slice::from_raw_parts(phys.to_virt().as_ptr::<u8>(), 8) };
+    let size = fdt::Fdt::total_size(header).ok()?;
+    if size > 16 << 20 || p + size > BOOT_MAP_END {
+        return None;
+    }
+    // SAFETY: the whole device tree is within the boot map's RAM, which
+    // stays mapped (memory::init keeps it out of the frame allocator), and
+    // nothing writes to it.
+    let bytes = unsafe { core::slice::from_raw_parts(phys.to_virt().as_ptr::<u8>(), size) };
+    fdt::Fdt::new(bytes).ok()
 }
 
 /// Stop this core for good.

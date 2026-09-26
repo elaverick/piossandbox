@@ -1,8 +1,8 @@
 [package]
-name = "heap-test"
+name = "host-tests"
 version = "0.1.0"
 edition = "2024"
-description = "Host unit tests for the pios heap allocator (src/allocator.rs)"
+description = "Host unit tests for the plain-logic parts of the pios kernel"
 publish = false
 
 [lib]

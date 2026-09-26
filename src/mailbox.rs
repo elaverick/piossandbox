@@ -1,6 +1,7 @@
 //! VideoCore mailbox "property" interface, used to ask the GPU firmware for
 //! information and to change settings such as clock rates.
 
+use crate::addr::{PhysAddr, VirtAddr};
 use crate::cache;
 use crate::mmio;
 use crate::timer::Deadline;
@@ -24,6 +25,7 @@ const TIMEOUT_US: u64 = 100_000;
 
 pub const TAG_GET_BOARD_REVISION: u32 = 0x0001_0002;
 pub const TAG_GET_ARM_MEMORY: u32 = 0x0001_0005;
+pub const TAG_GET_VC_MEMORY: u32 = 0x0001_0006;
 pub const TAG_SET_CLOCK_RATE: u32 = 0x0003_8002;
 pub const TAG_ALLOCATE_BUFFER: u32 = 0x0004_0001;
 pub const TAG_GET_DISPLAY_SIZE: u32 = 0x0004_0003;
@@ -116,8 +118,11 @@ pub struct Mailbox {
 }
 
 impl Mailbox {
-    pub const fn new(base: usize) -> Self {
-        Mailbox { base }
+    /// The mailbox whose registers are at physical address `base`.
+    pub const fn new(base: PhysAddr) -> Self {
+        Mailbox {
+            base: base.to_virt().as_usize(),
+        }
     }
 
     /// Send a single property tag to the firmware and wait for the reply.
@@ -148,9 +153,11 @@ impl Mailbox {
 
         let addr = msg.words.as_mut_ptr() as usize;
         let len = core::mem::size_of_val(&msg.words);
+        // The GPU needs the physical address.
+        let phys = VirtAddr::new(addr).to_phys()?;
         // Make the request visible to the GPU, which reads memory directly...
         cache::clean(addr, len);
-        let answered = self.call(CHANNEL_PROPERTY, addr);
+        let answered = self.call(CHANNEL_PROPERTY, phys);
         // ...and drop our cached copy so we read the GPU's reply. (The lines
         // hold nothing else, see `Message`.)
         cache::invalidate(addr, len);
@@ -159,10 +166,11 @@ impl Mailbox {
     }
 
     /// Post a message address to `channel` and wait for the firmware to reply.
-    fn call(&self, channel: u32, addr: usize) -> Option<()> {
+    fn call(&self, channel: u32, buffer: PhysAddr) -> Option<()> {
         // The buffer must live below 4 GiB for the 32-bit mailbox register;
         // our kernel and its stack sit just above 0x80000, so that holds.
-        let value = (addr as u32 & !0xF) | (channel & 0xF);
+        let buffer = u32::try_from(buffer.as_usize()).ok()?;
+        let value = (buffer & !0xF) | (channel & 0xF);
         let deadline = Deadline::after_us(TIMEOUT_US);
 
         // Make sure the message has reached memory before the GPU looks at it

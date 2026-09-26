@@ -8,6 +8,7 @@
 //! group for us; writing 1 to the enable bits below enables that group in
 //! either the secure or non-secure view of the registers.
 
+use crate::addr::PhysAddr;
 use crate::mmio;
 
 // Distributor registers.
@@ -41,8 +42,13 @@ pub struct Gic {
 }
 
 impl Gic {
-    pub const fn new(distributor: usize, cpu: usize) -> Self {
-        Gic { distributor, cpu }
+    /// The GIC whose distributor and CPU interface registers are at these
+    /// physical addresses.
+    pub const fn new(distributor: PhysAddr, cpu: PhysAddr) -> Self {
+        Gic {
+            distributor: distributor.to_virt().as_usize(),
+            cpu: cpu.to_virt().as_usize(),
+        }
     }
 
     /// Reset the GIC to "everything disabled, routed to core 0" and turn it

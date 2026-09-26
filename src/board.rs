@@ -4,6 +4,7 @@
 //! Raspberry Pi 5 (BCM2712). We tell them apart by their CPU cores, which
 //! works before we have any other way to talk to the hardware.
 
+use crate::addr::PhysAddr;
 use crate::cpu;
 use crate::gpio::{Function, Gpio, Pull};
 use crate::mailbox::{self, Mailbox};
@@ -41,8 +42,16 @@ impl Model {
         }
     }
 
+    /// Physical ranges holding peripherals, for the kernel map.
+    pub fn devices(self) -> &'static [(PhysAddr, usize)] {
+        match self {
+            Model::Pi4 => pi4::DEVICES,
+            Model::Pi5 => pi5::DEVICES,
+        }
+    }
+
     /// The GIC-400's distributor and CPU interface addresses.
-    pub fn gic(self) -> (usize, usize) {
+    pub fn gic(self) -> (PhysAddr, PhysAddr) {
         match self {
             Model::Pi4 => (pi4::GICD_BASE, pi4::GICC_BASE),
             Model::Pi5 => (pi5::GICD_BASE, pi5::GICC_BASE),
@@ -78,13 +87,16 @@ mod pi4 {
     /// Base of the peripheral window as seen by the ARM cores in the default
     /// "low peripheral" mode. (The Pi 2/3 use 0x3F00_0000, the Pi 1/Zero
     /// 0x2000_0000.)
-    const MMIO_BASE: usize = 0xFE00_0000;
-    const GPIO_BASE: usize = MMIO_BASE + 0x20_0000;
-    const UART0_BASE: usize = MMIO_BASE + 0x20_1000;
-    pub const MBOX_BASE: usize = MMIO_BASE + 0xB880;
+    const MMIO_BASE: PhysAddr = PhysAddr::new(0xFE00_0000);
+    /// For the kernel map: everything from the main peripherals up to the
+    /// GIC.
+    pub const DEVICES: &[(PhysAddr, usize)] = &[(PhysAddr::new(0xFC00_0000), 0x0400_0000)];
+    const GPIO_BASE: PhysAddr = PhysAddr::new(MMIO_BASE.as_usize() + 0x20_0000);
+    const UART0_BASE: PhysAddr = PhysAddr::new(MMIO_BASE.as_usize() + 0x20_1000);
+    pub const MBOX_BASE: PhysAddr = PhysAddr::new(MMIO_BASE.as_usize() + 0xB880);
     /// The GIC-400 sits in the "ARM local" block just above the peripherals.
-    pub const GICD_BASE: usize = 0xFF84_1000;
-    pub const GICC_BASE: usize = 0xFF84_2000;
+    pub const GICD_BASE: PhysAddr = PhysAddr::new(0xFF84_1000);
+    pub const GICC_BASE: PhysAddr = PhysAddr::new(0xFF84_2000);
     /// UART0's interrupt: SPI 121 in the device tree.
     const UART0_IRQ: u32 = 32 + 121;
 
@@ -130,24 +142,30 @@ mod pi5 {
     // peripherals sit at 0x10_0000_0000 + their bus address.
 
     /// The PL011 behind the 3-pin "UART" connector between the HDMI ports.
-    const DEBUG_UART_BASE: usize = 0x10_7D00_1000;
+    /// For the kernel map: the PCIe controllers, SoC peripherals and GIC,
+    /// and RP1 through PCIe.
+    pub const DEVICES: &[(PhysAddr, usize)] = &[
+        (PhysAddr::new(0x10_0000_0000), 0x8000_0000),
+        (PhysAddr::new(0x1F_0000_0000), 0x4000_0000),
+    ];
+    const DEBUG_UART_BASE: PhysAddr = PhysAddr::new(0x10_7D00_1000);
     /// Its fixed 9.216 MHz reference clock ("clk-uart" in the device tree).
     const DEBUG_UART_CLOCK_HZ: u32 = 9_216_000;
-    pub const MBOX_BASE: usize = 0x10_7C01_3880;
-    pub const GICD_BASE: usize = 0x10_7FFF_9000;
-    pub const GICC_BASE: usize = 0x10_7FFF_A000;
+    pub const MBOX_BASE: PhysAddr = PhysAddr::new(0x10_7C01_3880);
+    pub const GICD_BASE: PhysAddr = PhysAddr::new(0x10_7FFF_9000);
+    pub const GICC_BASE: PhysAddr = PhysAddr::new(0x10_7FFF_A000);
     /// The debug UART's interrupt: SPI 121 in the device tree.
     const DEBUG_UART_IRQ: u32 = 32 + 121;
 
     /// The PCIe controller that connects the BCM2712 to RP1.
-    const RP1_PCIE_BASE: usize = 0x10_0012_0000;
+    const RP1_PCIE_BASE: PhysAddr = PhysAddr::new(0x10_0012_0000);
     const PCIE_MISC_PCIE_STATUS: usize = 0x4068;
     const PCIE_STATUS_PHYLINKUP: u32 = 1 << 4;
     const PCIE_STATUS_DL_ACTIVE: u32 = 1 << 5;
 
     /// RP1's peripherals appear through PCIe at 0x1F_0000_0000; its UART0
     /// (GPIO 14/15, header pins 8 and 10) is at RP1 offset 0x30000.
-    const RP1_UART0_BASE: usize = 0x1F_0003_0000;
+    const RP1_UART0_BASE: PhysAddr = PhysAddr::new(0x1F_0003_0000);
 
     pub fn init_console() -> [Option<(Pl011, ConsoleUart)>; 2] {
         let debug = Pl011::new(DEBUG_UART_BASE);
@@ -185,7 +203,7 @@ mod pi5 {
     }
 
     fn rp1_link_up() -> bool {
-        let status = mmio::read(RP1_PCIE_BASE + PCIE_MISC_PCIE_STATUS);
+        let status = mmio::read(RP1_PCIE_BASE.to_virt().as_usize() + PCIE_MISC_PCIE_STATUS);
         let up = PCIE_STATUS_PHYLINKUP | PCIE_STATUS_DL_ACTIVE;
         status & up == up
     }

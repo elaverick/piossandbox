@@ -3,6 +3,7 @@
 //! On the Pi 5 the 40-pin header belongs to the RP1 chip, whose GPIO block
 //! works differently; the firmware sets up the pins we need there.
 
+use crate::addr::PhysAddr;
 use crate::mmio;
 
 /// Function select registers, 10 pins per register, 3 bits per pin.
@@ -42,8 +43,11 @@ pub struct Gpio {
 }
 
 impl Gpio {
-    pub const fn new(base: usize) -> Self {
-        Gpio { base }
+    /// The GPIO controller whose registers are at physical address `base`.
+    pub const fn new(base: PhysAddr) -> Self {
+        Gpio {
+            base: base.to_virt().as_usize(),
+        }
     }
 
     /// Select the function of a GPIO pin (0-57).

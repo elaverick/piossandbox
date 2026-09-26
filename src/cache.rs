@@ -41,8 +41,3 @@ pub fn clean(start: usize, len: usize) {
 pub fn invalidate(start: usize, len: usize) {
     for_each_line!("ivac", start, len);
 }
-
-/// Write out and then discard cached copies of the range.
-pub fn clean_invalidate(start: usize, len: usize) {
-    for_each_line!("civac", start, len);
-}

@@ -2,6 +2,7 @@
 //! 14/15); the Pi 5 has one in the BCM2712 for its debug connector and more
 //! in the RP1 chip, including UART0 on GPIO 14/15.
 
+use crate::addr::PhysAddr;
 use crate::mmio;
 use crate::timer::Deadline;
 
@@ -40,11 +41,20 @@ pub struct Pl011 {
 }
 
 impl Pl011 {
-    pub const fn new(base: usize) -> Self {
+    /// The UART whose registers are at physical address `base`.
+    pub const fn new(base: PhysAddr) -> Self {
+        Pl011 {
+            base: base.to_virt().as_usize(),
+        }
+    }
+
+    /// Rebuild from `virt_base` (see there).
+    pub const fn from_virt_base(base: usize) -> Self {
         Pl011 { base }
     }
 
-    pub fn base(&self) -> usize {
+    /// Where the kernel sees the registers, for storing compactly.
+    pub fn virt_base(&self) -> usize {
         self.base
     }
 

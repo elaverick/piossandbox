@@ -12,6 +12,12 @@
 // powered off until a PSCI call on the Pi 5), but we check anyway so a
 // different boot stub can't hurt us.
 
+// The kernel is linked at its place in the kernel's half of the address
+// space (see mmu.rs), but runs at its physical address until the MMU is on.
+// Until then, code must only use PC-relative addresses (`adr`), or subtract
+// KERNEL_BASE from linked ones (`ldr =symbol`).
+.equ KERNEL_BASE, 0xffffff8000000000
+
 .section ".text.boot", "ax"
 
 .global _start
@@ -26,15 +32,19 @@ _start:
     b       .Lpark
 
 .Lprimary:
-    // Keep the DTB pointer in a callee-saved register.
+    // Keep the DTB pointer in a callee-saved register, and KERNEL_BASE in
+    // another.
     mov     x19, x0
+    ldr     x20, =KERNEL_BASE
 
-    // If we were loaded somewhere other than our link address, copy the
-    // image into place. The firmware loads at 0x80000 or on a 2 MiB
+    // If we were loaded somewhere other than our (physical) link address,
+    // copy the image into place. The firmware loads at 0x80000 or on a 2 MiB
     // boundary, so the two copies never overlap the code doing the copying.
     adr     x1, _start                  // where we are
-    ldr     x2, =_start                 // where we should be
+    ldr     x2, =_start
+    sub     x2, x2, x20                 // where we should be
     ldr     x3, =__image_end
+    sub     x3, x3, x20
     sub     x3, x3, x2                  // image size, a multiple of 16
     cmp     x1, x2
     b.eq    .Lin_place
@@ -63,14 +73,10 @@ _start:
     dsb     sy
     isb
     ldr     x1, =.Lin_place
+    sub     x1, x1, x20
     br      x1
 
 .Lin_place:
-    // Our stack lives just after the kernel image (see linker.ld). It must
-    // not go below 0x80000: on the Pi 5 that memory belongs to the secure
-    // firmware (TF-A).
-    ldr     x1, =__stack_top
-
     // Drop to EL1, where kernels normally run: it has the usual kernel
     // registers and timer, and leaves EL2 free. The Pi firmware enters at
     // EL2; QEMU without firmware enters at EL3.
@@ -119,20 +125,15 @@ _start:
     eret
 
 .Lat_el1:
-    mov     sp, x1
-
     // Don't trap FP/SIMD at EL1 (we build soft-float, but be safe).
     mov     x2, #(3 << 20)              // CPACR_EL1.FPEN
     msr     cpacr_el1, x2
 
-    // Install the exception vectors.
-    ldr     x2, =exception_vectors
-    msr     vbar_el1, x2
-    isb
-
     // Zero the .bss section (both ends are 16-byte aligned by linker.ld).
     ldr     x1, =__bss_start
+    sub     x1, x1, x20
     ldr     x2, =__bss_end
+    sub     x2, x2, x20
 .Lzero_bss:
     cmp     x1, x2
     b.hs    .Lbss_done
@@ -142,8 +143,23 @@ _start:
 .Lbss_done:
     bl      enable_mmu
 
-    // Hand over to Rust: kernel_main(dtb). All Rust code runs with the MMU
-    // and caches on.
+    // The MMU is on, and the same tables map the kernel both where it runs
+    // now (TTBR0, identity) and where it is linked (TTBR1). Jump up there.
+    ldr     x1, =.Lin_kernel_half
+    br      x1
+
+.Lin_kernel_half:
+    // Our stack lives just after the kernel image (see linker.ld). It must
+    // not go below physical 0x80000: on the Pi 5 that memory belongs to the
+    // secure firmware (TF-A).
+    ldr     x1, =__stack_top
+    mov     sp, x1
+    ldr     x1, =exception_vectors
+    msr     vbar_el1, x1
+    isb
+
+    // Hand over to Rust: kernel_main(dtb), with the device tree's physical
+    // address. All Rust code runs with the MMU and caches on.
     mov     x0, x19
     bl      kernel_main
 
@@ -158,10 +174,10 @@ _start:
 //   1: Normal, write-back      RAM
 //   2: Normal, non-cacheable   the framebuffer (set up later by mmu.rs)
 .equ MAIR_VALUE,        0x44ff00
-// TCR_EL1: 39-bit addresses from TTBR0 (T0SZ = 25), 4 KiB granule, table
-// walks inner-shareable write-back, TTBR1 walks disabled, 40-bit physical
-// addresses.
-.equ TCR_VALUE,         0x200993519
+// TCR_EL1: 39-bit address ranges from both TTBR0 (low half) and TTBR1
+// (kernel half) (T0SZ = T1SZ = 25), 4 KiB granules, table walks
+// inner-shareable write-back, 40-bit physical addresses.
+.equ TCR_VALUE,         0x2b5193519
 // Block descriptors: AF | attribute index | (shareability, execute-never).
 .equ NORMAL_BLOCK,      0x705
 .equ DEVICE_BLOCK,      0x60000000000401
@@ -181,11 +197,18 @@ page_table_l2:
 
 .section ".text", "ax"
 
-// Build an identity map and turn on the MMU and caches. Must run at EL1
-// with the MMU off, after .bss is zeroed.
+// Build the boot page tables and turn on the MMU and caches. Must run at
+// EL1 with the MMU off, after .bss is zeroed, with x20 = KERNEL_BASE.
+//
+// The boot map covers the first GiB of RAM and the peripherals. It is used
+// both as an identity map (TTBR0) and for the kernel half (TTBR1): with 39-bit
+// ranges, KERNEL_BASE + p and p select the same table entries. mmu.rs later
+// replaces it with a full map.
 enable_mmu:
     ldr     x0, =page_table_l1
+    sub     x0, x0, x20                 // physical addresses: the MMU is off
     ldr     x1, =page_table_l2
+    sub     x1, x1, x20
 
     // L1[0] -> L2: the first GiB, all RAM (including the GPU's share),
     // write-back cacheable.
@@ -226,7 +249,9 @@ enable_mmu:
     lsl     x4, x4, x3                      // bytes per line
     sub     x5, x4, #1
     ldr     x1, =__kernel_start
+    sub     x1, x1, x20
     ldr     x2, =__kernel_end
+    sub     x2, x2, x20
     bic     x1, x1, x5
 2:  dc      ivac, x1
     add     x1, x1, x4
@@ -239,6 +264,7 @@ enable_mmu:
     ldr     x1, =TCR_VALUE
     msr     tcr_el1, x1
     msr     ttbr0_el1, x0
+    msr     ttbr1_el1, x0
     isb
     tlbi    vmalle1
     ic      iallu
@@ -249,6 +275,26 @@ enable_mmu:
     mov     x2, #(SCTLR_M | SCTLR_C | SCTLR_I)
     orr     x1, x1, x2
     msr     sctlr_el1, x1
+    isb
+    ret
+
+// Switch the kernel half (TTBR1) to new page tables. x0 = physical address
+// of the new top-level table. Called from Rust with IRQs masked.
+//
+// While TTBR1 changes, nothing may be translated through it, so this runs
+// from the identity map (TTBR0, set up by the boot map), touching neither
+// the stack nor any data, then returns to the caller in the kernel half.
+.global switch_kernel_tables
+switch_kernel_tables:
+    ldr     x1, =KERNEL_BASE
+    adr     x2, 1f
+    sub     x2, x2, x1                  // this code's identity-mapped address
+    br      x2
+1:  dsb     ish
+    msr     ttbr1_el1, x0
+    isb
+    tlbi    vmalle1
+    dsb     ish
     isb
     ret
 

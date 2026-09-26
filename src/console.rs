@@ -23,7 +23,7 @@ pub fn add(uart: Pl011, irq: Option<u32>) {
     // Only core 0 runs for now, so there is no race here.
     if let Some(slot) = (0..MAX_UARTS).find(|&i| UARTS[i].load(Ordering::Relaxed) == 0) {
         UART_IRQS[slot].store(irq.unwrap_or(0), Ordering::Relaxed);
-        UARTS[slot].store(uart.base(), Ordering::Relaxed);
+        UARTS[slot].store(uart.virt_base(), Ordering::Relaxed);
     }
 }
 
@@ -36,7 +36,7 @@ fn slots() -> impl Iterator<Item = (Pl011, u32)> {
             )
         })
         .filter(|&(base, _)| base != 0)
-        .map(|(base, irq)| (Pl011::new(base), irq))
+        .map(|(base, irq)| (Pl011::from_virt_base(base), irq))
 }
 
 fn uarts() -> impl Iterator<Item = Pl011> {

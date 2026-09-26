@@ -8,9 +8,9 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use crate::addr::PhysAddr;
 use crate::font;
 use crate::mailbox::{self, Mailbox, Message};
-use crate::mmu;
 
 /// The largest display we support (4K).
 const MAX_WIDTH: usize = 4096;
@@ -37,7 +37,8 @@ const fn rgb(red: u8, green: u8, blue: u8) -> u32 {
 /// A 32 bits-per-pixel framebuffer.
 #[derive(Clone, Copy)]
 pub struct FrameBuffer {
-    base: usize,
+    /// Physical address of the first pixel.
+    base: PhysAddr,
     width: usize,
     height: usize,
     /// Bytes from one row of pixels to the next.
@@ -46,20 +47,22 @@ pub struct FrameBuffer {
 
 impl FrameBuffer {
     const NONE: FrameBuffer = FrameBuffer {
-        base: 0,
+        base: PhysAddr::new(0),
         width: 0,
         height: 0,
         pitch: 0,
     };
 
     /// Ask the firmware for a framebuffer at the display's native resolution.
+    /// Returns it and the size of the buffer the firmware allocated. Nothing
+    /// may draw on it until the kernel map covers it (see `start`).
     ///
     /// This follows the firmware's documented property interface
     /// (github.com/raspberrypi/firmware/wiki/Mailbox-property-interface) and
     /// the tag sequence Linux's bcm2708_fb driver uses when the firmware
     /// allocates the buffer. The Pi 5's device tree still enables that driver,
     /// so the interface works the same on the Pi 4 and Pi 5.
-    pub fn allocate(mailbox: Mailbox) -> Option<FrameBuffer> {
+    pub fn allocate(mailbox: Mailbox) -> Option<(FrameBuffer, usize)> {
         let mut size = [0u32; 2];
         let (width, height) = match mailbox.property(mailbox::TAG_GET_DISPLAY_SIZE, &mut size) {
             Some(())
@@ -86,7 +89,7 @@ impl FrameBuffer {
         let fb = FrameBuffer {
             // The firmware returns a VideoCore bus address; the low 30 bits
             // are the ARM physical address.
-            base: (msg.value(buffer, 0) & 0x3FFF_FFFF) as usize,
+            base: PhysAddr::new((msg.value(buffer, 0) & 0x3FFF_FFFF) as usize),
             width: msg.value(physical, 0) as usize,
             height: msg.value(physical, 1) as usize,
             pitch: msg.value(pitch, 0) as usize,
@@ -94,19 +97,20 @@ impl FrameBuffer {
         let buffer_size = msg.value(buffer, 1) as usize;
         let valid = all_answered
             && msg.value(depth, 0) == 32
-            && fb.base != 0
-            && fb.base.is_multiple_of(4)
+            && fb.base.as_usize() != 0
+            && fb.base.as_usize().is_multiple_of(4)
             && (1..=MAX_WIDTH).contains(&fb.width)
             && (1..=MAX_HEIGHT).contains(&fb.height)
             && fb.pitch >= fb.width * 4
             && buffer_size >= fb.pitch * fb.height;
-        if !valid {
-            return None;
-        }
-        // The GPU scans the framebuffer out of memory, so it mustn't be
-        // cached: map it non-cacheable (writes may still be combined, which
-        // is what makes this fast).
-        mmu::map_non_cacheable(fb.base, buffer_size).then_some(fb)
+        valid.then_some((fb, buffer_size))
+    }
+
+    /// The physical memory holding the pixels. The GPU scans it out of
+    /// memory, so the kernel map makes it non-cacheable (writes may still be
+    /// combined, which is what makes drawing fast).
+    pub fn memory(&self) -> (PhysAddr, usize) {
+        (self.base, self.pitch * self.height)
     }
 
     pub fn width(&self) -> usize {
@@ -117,13 +121,13 @@ impl FrameBuffer {
         self.height
     }
 
-    pub fn base(&self) -> usize {
+    pub fn base(&self) -> PhysAddr {
         self.base
     }
 
     /// Fill `count` pixels starting at (x, y), within one row.
     fn fill_span(&self, x: usize, y: usize, count: usize, color: u32) {
-        let row = (self.base + y * self.pitch + x * 4) as *mut u32;
+        let row = (self.base.to_virt() + y * self.pitch + x * 4).as_ptr::<u32>();
         for i in 0..count {
             // SAFETY: callers keep (x + count, y) within the framebuffer the
             // firmware allocated for us. Framebuffer memory is shared with
@@ -188,7 +192,7 @@ impl TextConsole {
     }
 
     fn active(&self) -> bool {
-        self.fb.base != 0
+        self.fb.base.as_usize() != 0
     }
 
     fn putc(&mut self, byte: u8) {
@@ -328,16 +332,17 @@ pub struct DisplayInfo {
     pub displays: Option<u32>,
 }
 
-/// Allocate a framebuffer and start the display console on it.
-pub fn init(mailbox: Mailbox) -> Option<DisplayInfo> {
-    // Diagnostic only: with hdmi_force_hotplug=1 the firmware drives HDMI
-    // even when it counts no displays, so we carry on either way.
+/// How many displays the firmware says are attached. Diagnostic only: with
+/// hdmi_force_hotplug=1 it drives HDMI even when it counts none.
+pub fn count_displays(mailbox: Mailbox) -> Option<u32> {
     let mut count = [0u32; 1];
-    let displays = mailbox
+    mailbox
         .property(mailbox::TAG_GET_NUM_DISPLAYS, &mut count)
-        .map(|()| count[0]);
+        .map(|()| count[0])
+}
 
-    let fb = FrameBuffer::allocate(mailbox)?;
+/// Start the display console on `fb`, which the kernel map must cover.
+pub fn start(fb: FrameBuffer, displays: Option<u32>) -> Option<DisplayInfo> {
     CONSOLE.with(|console| {
         console.start(fb);
         DisplayInfo {

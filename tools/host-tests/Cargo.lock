@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "heap-test"
+name = "host-tests"
 version = "0.1.0"

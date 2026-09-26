@@ -2,6 +2,7 @@
 
 use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize, Ordering};
 
+use crate::addr::PhysAddr;
 use crate::gic::{self, Gic};
 
 const MAX_IDS: usize = 1020;
@@ -11,22 +12,23 @@ const MAX_IDS: usize = 1020;
 static HANDLERS: [AtomicPtr<()>; MAX_IDS] =
     [const { AtomicPtr::new(core::ptr::null_mut()) }; MAX_IDS];
 
+/// Physical addresses of the GIC's two register blocks.
 static DISTRIBUTOR: AtomicUsize = AtomicUsize::new(0);
 static CPU_INTERFACE: AtomicUsize = AtomicUsize::new(0);
 static UNEXPECTED: AtomicU32 = AtomicU32::new(0);
 
 fn gic() -> Gic {
     Gic::new(
-        DISTRIBUTOR.load(Ordering::Relaxed),
-        CPU_INTERFACE.load(Ordering::Relaxed),
+        PhysAddr::new(DISTRIBUTOR.load(Ordering::Relaxed)),
+        PhysAddr::new(CPU_INTERFACE.load(Ordering::Relaxed)),
     )
 }
 
 /// Set up the interrupt controller, with every interrupt disabled. Returns
 /// the number of interrupt IDs it supports.
-pub fn init(distributor: usize, cpu_interface: usize) -> u32 {
-    DISTRIBUTOR.store(distributor, Ordering::Relaxed);
-    CPU_INTERFACE.store(cpu_interface, Ordering::Relaxed);
+pub fn init(distributor: PhysAddr, cpu_interface: PhysAddr) -> u32 {
+    DISTRIBUTOR.store(distributor.as_usize(), Ordering::Relaxed);
+    CPU_INTERFACE.store(cpu_interface.as_usize(), Ordering::Relaxed);
     gic().init()
 }
 

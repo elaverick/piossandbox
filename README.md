@@ -29,16 +29,21 @@ the machine, and echoes back anything typed on the serial console.
 | `src/timer.rs` | ARM generic timer: timeouts and the 100 Hz tick |
 | `src/exception.rs` | Trap frames, `svc`/`brk` handling, register dumps for fatal exceptions |
 | `src/gic.rs`, `src/irq.rs` | GIC-400 interrupt controller and interrupt dispatch |
-| `src/mmu.rs`, `src/cache.rs` | The memory map (built in `boot.s`), remapping, cache maintenance |
+| `src/addr.rs` | `PhysAddr`, `VirtAddr` and the kernel's linear map |
+| `src/memory.rs`, `src/frames.rs`, `src/ranges.rs` | Finding RAM, the physical frame allocator, `OwnedFrame` |
+| `src/paging.rs` | Page tables with typed permissions (W^X) |
+| `src/mmu.rs`, `src/cache.rs` | The kernel map, TTBR switching, address probes, cache maintenance |
+| `src/addrspace.rs` | User address spaces (TTBR0) |
 | `src/heap.rs`, `src/allocator.rs` | The kernel heap behind `Box`/`Vec`/`String`, and its free-list allocator |
 | `src/sync.rs` | `SpinLock` (masks IRQs while held) |
-| `src/fdt.rs` | Device tree reader (header and reserved memory, so far) |
+| `src/fdt.rs` | Device tree parser |
+| `docs/design.md` | The overall design: microkernel, IPC, capabilities, roadmap |
 | `src/cpu.rs`, `src/mmio.rs` | CPU identification, volatile register access |
 | `linker.ld` | Places the kernel at 0x80000 with `_start` first, then `.bss` and a 64 KiB stack |
 | `boot/config.txt` | Firmware configuration for the SD card |
 | `tools/qemu-raspi5/` | A minimal Pi 5 machine for QEMU, for testing |
 | `scripts/` | QEMU tests (serial and screen), SD card assembly |
-| `tools/heap-test/` | Host unit tests for the allocator |
+| `tools/host-tests/` | Host unit tests for the plain-logic modules |
 
 ## Building
 
@@ -65,13 +70,17 @@ make run QEMU_DISPLAY=gtk   # ...and the HDMI output in a window
 make test       # boot, type into UART0, and check the serial and HDMI output
 ```
 
-`make test-host` runs the allocator's unit tests on your machine (no QEMU
-needed), including a 200,000-step randomized test that checks every block for
-overlaps, alignment and corrupted contents.
+`make test-host` runs unit tests on your machine (no QEMU needed) for the
+modules that are plain logic, compiled unchanged from `src/`: the heap
+allocator, the frame allocator, the page tables, the device tree parser and
+the range set. They include randomized tests against simple models, and for
+the device tree parser, every truncation and single-byte corruption of a
+test tree (which must be rejected or handled, never crash). They also check
+the real Pi 4 and Pi 5 device trees if `make sdcard` has downloaded them.
 
 The serial test (`scripts/qemu-test.sh`) checks the banner (including that
-the kernel runs at EL1 and its exception, interrupt, MMU and heap self-test
-passed), types a line, and pastes a 12 KB burst that must be echoed back
+the kernel runs at EL1 and its exception, interrupt, memory and address
+space self-test passed), types a line, and pastes a 12 KB burst that must be echoed back
 intact.
 
 The HDMI test (`scripts/qemu-screen-test.sh`) types enough to make the
@@ -202,41 +211,88 @@ and its table level, permission fault, alignment fault and so on).
 
 ## Memory
 
-Before calling any Rust code, `boot.s` builds page tables and turns on the
-MMU and the instruction and data caches. The map is an identity map
-(virtual address = physical address), 39 bits wide:
+See also [docs/design.md](docs/design.md) for the overall design.
 
-| Range | Mapped as | Contents |
+### Address space
+
+Virtual addresses are 39 bits wide in each half of the address space:
+
+| Range | Contents | Page table |
 | --- | --- | --- |
-| 0 - 1 GiB | Normal, write-back cached | RAM, including the GPU's share |
-| 3 - 4 GiB | Device | Pi 4 peripherals and GIC |
-| 0x10_0000_0000 - 0x10_7FFF_FFFF | Device | Pi 5 PCIe controllers, peripherals and GIC |
-| 0x1F_0000_0000 - 0x1F_3FFF_FFFF | Device | Pi 5 RP1 (through PCIe) |
+| `0x0000_0000_0000_0000` - `0x0000_007F_FFFF_FFFF` | the running process | TTBR0, one per process |
+| `0xFFFF_FF80_0000_0000` - `0xFFFF_FFFF_FFFF_FFFF` | the kernel | TTBR1 |
 
-Anything else is unmapped and faults. One table covers both boards; each
-simply never touches the other's device ranges. RAM above 1 GiB isn't mapped
-yet.
+The kernel half is a **linear map**: physical address `p` is at
+`0xFFFF_FF80_0000_0000 + p`, and the kernel is linked at its place in it
+(`0xFFFF_FF80_0008_0000`). Physical and virtual addresses are different Rust
+types (`PhysAddr`, `VirtAddr`), converted only through the linear map.
 
-Memory the GPU reads or writes directly needs care now that the CPU caches
-RAM:
+### Start-up
 
-- **The framebuffer** is switched to Normal non-cacheable (write-combining)
-  once allocated.
-- **Mailbox messages** sit on cache lines of their own; they are cleaned to
+1. `boot.s` runs at the physical address the firmware loaded it to, using
+   only position-independent code. It builds a small boot map (the first
+   GiB of RAM and the peripherals) used both as an identity map and for the
+   kernel half, turns on the MMU and caches, and jumps up into the kernel
+   half.
+2. Rust finds the RAM: the device tree's `/memory` nodes (or the firmware's
+   figure), minus the GPU's memory and `no-map` reservations such as the Pi
+   5's secure firmware (TF-A) region.
+3. The **frame allocator** (`src/frames.rs`) takes all RAM except what lies
+   below the end of the kernel, the device tree, and anything reserved. It
+   keeps a bitmap per region and hands out 4 KiB frames, singly or in
+   aligned contiguous runs. Freeing a frame twice, or one it doesn't own,
+   panics.
+4. The **kernel map** is built with 4 KiB pages and 2 MiB/1 GiB blocks
+   (`src/paging.rs`, `src/mmu.rs`):
+
+   | What | Mapped as |
+   | --- | --- |
+   | kernel code | read-execute |
+   | kernel constants | read-only |
+   | kernel data, stack, all other RAM | read-write, never executable |
+   | peripherals | Device, never executable |
+   | framebuffer | Normal non-cacheable (write-combining) |
+
+   The switch happens from a tiny trampoline running on the identity map,
+   so the kernel half's tables never change while in use; then the identity
+   map is removed and the lower half is left empty.
+5. The heap takes its memory from the frame allocator.
+
+### Guard rails
+
+- Page permissions are typed: `Access` only offers read-only, read-write
+  and read-execute, for kernel or user, so a writable and executable page
+  can't be expressed. Device and non-cacheable memory is never executable.
+  A page table only accepts addresses from its own half.
+- Frames and page tables are owned values: an `OwnedFrame` returns itself to
+  the allocator when dropped, a `PageTable` frees its tables, and an
+  `AddressSpace` frees both, switching away first if it is active.
+- `map` and `unmap` are all-or-nothing: on error nothing has changed.
+- The crate denies `unsafe` operations outside `unsafe` blocks and `unsafe`
+  blocks without a `// SAFETY:` comment.
+
+### User address spaces
+
+`AddressSpace` (`src/addrspace.rs`) is one process's lower half: it maps
+zeroed pages with user permissions (never at page 0), can be activated
+(TTBR0; the whole TLB is flushed on each switch, as there are no address
+space IDs yet) and frees everything when dropped. Nothing runs in user mode
+yet; the boot self-test builds two address spaces and checks with the MMU's
+address translation instruction that they are isolated, that permissions
+hold from user mode and kernel mode, that kernel code isn't writable and
+kernel data isn't executable, and that all memory comes back.
+
+### Memory shared with the GPU
+
+- The framebuffer is mapped non-cacheable, so the GPU sees what is drawn.
+- Mailbox messages sit on cache lines of their own; they are cleaned to
   memory before the GPU reads them and invalidated before we read the reply.
-
-With RAM mapped as Normal memory, unaligned accesses and atomic
-read-modify-write instructions work, and the boot self-test checks both.
-(The compiler still never emits unaligned accesses: strict alignment is part
-of this Rust target's defaults, which is also what made the code safe to run
-before the MMU was on.)
 
 ## Heap
 
 The kernel can use `alloc` (`Box`, `Vec`, `String`, `BTreeMap`, `format!`).
-The heap is the largest stretch of free RAM after the kernel, below the end
-of the ARM's share of RAM (as the firmware reports it) and clear of the
-device tree and anything the device tree reserves (`/memreserve/`).
+The heap is a contiguous block from the frame allocator: a sixteenth of free
+RAM, between 4 and 64 MiB.
 
 The allocator (`src/allocator.rs`) is a first-fit free list: free blocks
 are kept in address order, each storing its size and the next block's

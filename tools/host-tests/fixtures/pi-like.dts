@@ -1,0 +1,51 @@
+// A small device tree laid out like the Raspberry Pi's, for the fdt tests.
+// Rebuild the .dtb with: dtc -I dts -O dtb -o pi-like.dtb pi-like.dts
+/dts-v1/;
+
+/memreserve/ 0x00000000 0x00001000;
+/memreserve/ 0x2eff0000 0x00010000;
+
+/ {
+	compatible = "raspberrypi,4-model-b", "brcm,bcm2711";
+	model = "Raspberry Pi 4 Model B";
+	#address-cells = <2>;
+	#size-cells = <1>;
+
+	memory@0 {
+		device_type = "memory";
+		reg = <0x0 0x00000000 0x3b400000>,
+		      <0x0 0x40000000 0xbc000000>,
+		      <0x1 0x00000000 0x80000000>;
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <1>;
+		ranges;
+
+		atf@0 {
+			reg = <0x0 0x00000000 0x00080000>;
+			no-map;
+		};
+
+		linux,cma {
+			compatible = "shared-dma-pool";
+			size = <0x4000000>;
+			reusable;
+		};
+	};
+
+	chosen {
+		bootargs = "console=serial0,115200";
+		linux,initrd-start = <0x02000000>;
+		linux,initrd-end = <0x02100000>;
+	};
+
+	soc {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		serial@7e201000 {
+			reg = <0x7e201000 0x200>;
+		};
+	};
+};

@@ -6,9 +6,9 @@ use alloc::vec::Vec;
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::NonNull;
 
+use crate::addr::{PAGE_SIZE, VirtAddr};
 use crate::allocator::{Heap, Stats};
-use crate::fdt::Fdt;
-use crate::mmu;
+use crate::memory;
 use crate::sync::SpinLock;
 
 struct KernelAllocator(SpinLock<Heap>);
@@ -36,70 +36,22 @@ unsafe impl GlobalAlloc for KernelAllocator {
 #[global_allocator]
 static ALLOCATOR: KernelAllocator = KernelAllocator(SpinLock::new(Heap::empty()));
 
-unsafe extern "C" {
-    static __kernel_end: u8;
-}
+/// Heap size: a sixteenth of usable RAM, between these limits.
+const MIN_SIZE: usize = 4 << 20;
+const MAX_SIZE: usize = 64 << 20;
 
-/// How much to use if the firmware can't tell us how much RAM there is.
-const FALLBACK_SIZE: usize = 16 << 20;
-const PAGE: usize = 4096;
-
-/// Give the heap the free RAM after the kernel, up to the end of the ARM's
-/// share of RAM (`ram_end`, from the firmware), avoiding the device tree and
-/// anything it lists as reserved: the largest gap between those is used.
-/// Returns the heap's `(start, end)`, or `None` if no usable memory was
-/// found.
-pub fn init(ram_end: Option<usize>, fdt: Option<&Fdt>) -> Option<(usize, usize)> {
-    let low = (&raw const __kernel_end as usize).next_multiple_of(PAGE);
-    let mut high = ram_end
-        .unwrap_or(low + FALLBACK_SIZE)
-        .min(mmu::MAPPED_RAM_END);
-
-    // Ranges to keep out of, collected without a heap (we're making it).
-    const MAX_HOLES: usize = 16;
-    let mut holes = [(0usize, 0usize); MAX_HOLES];
-    let mut count = 0;
-    let mut avoid = |from: usize, size: usize| {
-        let to = from.saturating_add(size);
-        if count < MAX_HOLES {
-            holes[count] = (from, to);
-            count += 1;
-        } else if to > low {
-            // No room to track it: just stop the heap before it.
-            high = high.min(from.max(low));
-        }
-    };
-    if let Some(fdt) = fdt {
-        avoid(fdt.addr(), fdt.size());
-        for (addr, size) in fdt.reservations() {
-            avoid(addr, size);
-        }
-    }
-    let holes = &mut holes[..count];
-    holes.sort_unstable();
-
-    // Walk the gaps between the holes and keep the biggest.
-    let mut best = (0, 0);
-    let mut cursor = low;
-    for &(from, to) in holes.iter().chain(core::iter::once(&(high, high))) {
-        let gap_end = from.min(high) & !(PAGE - 1);
-        let gap_start = cursor.next_multiple_of(PAGE);
-        if gap_end > gap_start && gap_end - gap_start > best.1 - best.0 {
-            best = (gap_start, gap_end);
-        }
-        cursor = cursor.max(to);
-    }
-    let (start, end) = best;
-    if end <= start {
-        return None;
-    }
-
+/// Give the heap its memory: contiguous frames from the frame allocator.
+/// Returns where the heap is, or `None` if there wasn't enough memory.
+pub fn init() -> Option<(VirtAddr, usize)> {
+    let usable = memory::frame_stats().free * PAGE_SIZE;
+    let size = (usable / 16).clamp(MIN_SIZE, MAX_SIZE);
+    let start = memory::allocate_permanent(size)?.to_virt();
     let mut heap = ALLOCATOR.0.lock();
-    // SAFETY: this RAM is mapped, lies after everything the kernel image and
-    // stack use, and avoids the device tree and reserved ranges; nothing
-    // else uses it.
-    unsafe { heap.init(start, end - start) };
-    Some(heap.region())
+    // SAFETY: these frames were just allocated for the heap, for good; they
+    // are RAM, mapped read-write in the linear map, and nothing else uses
+    // them.
+    unsafe { heap.init(start.as_usize(), size) };
+    Some((start, size))
 }
 
 pub fn stats() -> Stats {

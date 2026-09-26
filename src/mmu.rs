@@ -1,40 +1,30 @@
-//! The memory map. boot.s builds it and turns the MMU on before any Rust
-//! code runs; this module describes it and makes later changes.
+//! The kernel's memory map and MMU control.
 //!
-//! Virtual addresses equal physical ones (an identity map), 39 bits wide,
-//! with 4 KiB pages:
+//! boot.s turns the MMU on with a small boot map (the first GiB of RAM and
+//! the peripherals, used both as an identity map and for the kernel half).
+//! `install_kernel_map` then builds the real map for the kernel half
+//! (TTBR1) and removes the identity map. The lower half (TTBR0) belongs to
+//! whichever user address space is active, or to an empty table.
 //!
-//! | Range                         | Mapped as                     | What        |
-//! |-------------------------------|-------------------------------|-------------|
-//! | 0 - 1 GiB                     | Normal, write-back (2 MiB)    | RAM, incl. the GPU's share |
-//! | 3 - 4 GiB                     | Device                        | Pi 4 peripherals |
-//! | 0x10_0000_0000 + 2 GiB        | Device                        | Pi 5 PCIe controllers, SoC peripherals |
-//! | 0x1F_0000_0000 + 1 GiB        | Device                        | Pi 5 RP1 (through PCIe) |
+//! The kernel half is a linear map: physical `p` is at `KERNEL_BASE + p`.
 //!
-//! Everything else is unmapped, so a stray access faults instead of reaching
-//! something unexpected. The framebuffer is later switched to Normal
-//! non-cacheable by `map_non_cacheable`.
+//! | What | Mapped as |
+//! | --- | --- |
+//! | kernel code | read-execute |
+//! | kernel constants | read-only |
+//! | kernel data, stack, all other RAM | read-write, never executable |
+//! | peripherals | Device, read-write, never executable |
+//! | framebuffer | Normal non-cacheable, read-write, never executable |
+//!
+//! Everything else is unmapped, so a stray access faults.
 
 use core::arch::asm;
 
-use crate::cache;
-
-const BLOCK_SIZE: usize = 2 << 20;
-const L2_COVERS: usize = 512 * BLOCK_SIZE;
-
-/// RAM is mapped from 0 up to here.
-pub const MAPPED_RAM_END: usize = L2_COVERS;
-
-// Block descriptors (see boot.s).
-const DESCRIPTOR_TYPE_MASK: u64 = 0b11;
-const ATTR_INDEX_MASK: u64 = 0b111 << 2;
-const ATTR_NON_CACHEABLE: u64 = 2 << 2;
-const EXECUTE_NEVER: u64 = (1 << 53) | (1 << 54);
-
-unsafe extern "C" {
-    /// The level 2 table covering the first GiB, built by boot.s.
-    static mut page_table_l2: [u64; 512];
-}
+use crate::addr::{PAGE_SIZE, PhysAddr, VirtAddr};
+use crate::memory;
+use crate::paging::{Access, Attributes, ENTRIES, Half, MapError, PageTable, TableMemory};
+use crate::ranges::RangeSet;
+use crate::sync::SpinLock;
 
 const SCTLR_M: u64 = 1 << 0;
 const SCTLR_C: u64 = 1 << 2;
@@ -49,42 +39,238 @@ pub fn enabled() -> bool {
     sctlr & all == all
 }
 
-/// Map `[start, start + len)` as Normal non-cacheable memory (writes may be
-/// combined but are never held in the cache), for memory the GPU reads
-/// directly. Works in whole 2 MiB blocks within the first GiB; returns false
-/// if the range is outside it.
-pub fn map_non_cacheable(start: usize, len: usize) -> bool {
-    let end = start + len;
-    if len == 0 || end > L2_COVERS {
-        return false;
+/// Page tables for kernel use, in frames from the frame allocator, reached
+/// through the linear map.
+pub struct KernelTableMemory;
+
+// SAFETY: tables are whole frames from the frame allocator, owned by the
+// page table until freed, and the linear map covers all RAM.
+unsafe impl TableMemory for KernelTableMemory {
+    fn allocate_table(&mut self) -> Option<PhysAddr> {
+        memory::allocate_zeroed_frame()
     }
 
-    // Write back and drop anything cached for the range while it is still
-    // mapped cacheable; afterwards the cache must hold nothing for it.
-    cache::clean_invalidate(start, len);
+    unsafe fn free_table(&mut self, table: PhysAddr) {
+        // SAFETY: the caller guarantees nothing references the table.
+        unsafe { memory::free_frame(table) };
+    }
 
-    let table = &raw mut page_table_l2;
-    for index in start / BLOCK_SIZE..end.div_ceil(BLOCK_SIZE) {
-        // SAFETY: `index` < 512; the table is only changed here, by the
-        // primary core, and nothing else uses the range being changed.
-        unsafe {
-            let entry = (&raw mut (*table)[index]).read_volatile();
-            if entry & DESCRIPTOR_TYPE_MASK == 0 {
-                continue;
+    fn table(&self, table: PhysAddr) -> *mut [u64; ENTRIES] {
+        table.to_virt().as_ptr()
+    }
+}
+
+/// The kernel half's page tables, once built.
+static KERNEL_MAP: SpinLock<Option<PageTable<KernelTableMemory>>> = SpinLock::new(None);
+
+/// The lower half's table while no user address space is active: maps
+/// nothing, so any access below the kernel half faults.
+#[repr(C, align(4096))]
+struct EmptyTable([u64; ENTRIES]);
+static EMPTY_TABLE: EmptyTable = EmptyTable([0; ENTRIES]);
+
+unsafe extern "C" {
+    static __kernel_start: u8;
+    static __text_end: u8;
+    static __rodata_end: u8;
+    static __kernel_end: u8;
+    /// In boot.s: switch TTBR1 to `root`, from the identity map.
+    fn switch_kernel_tables(root: usize);
+}
+
+/// The physical range of the kernel image, from its first byte to the end
+/// of its stack.
+pub fn kernel_image() -> (PhysAddr, PhysAddr) {
+    let phys = |symbol: *const u8| {
+        VirtAddr::from_ptr(symbol)
+            .to_phys()
+            .expect("kernel is in the linear map")
+    };
+    (
+        phys(&raw const __kernel_start),
+        phys(&raw const __kernel_end),
+    )
+}
+
+/// What goes in the kernel map, besides the kernel itself.
+pub struct KernelMapPlan<'a> {
+    /// All RAM to map (read-write, never executable).
+    pub ram: &'a RangeSet<32>,
+    /// Peripheral ranges.
+    pub devices: &'a [(PhysAddr, usize)],
+    /// The framebuffer, if any.
+    pub framebuffer: Option<(PhysAddr, usize)>,
+}
+
+/// Build the kernel map, switch to it and remove the identity map.
+pub fn install_kernel_map(plan: &KernelMapPlan) -> Result<(), MapError> {
+    let mut map = PageTable::new(Half::Upper, KernelTableMemory)?;
+    let at = |p: PhysAddr| p.to_virt().as_usize();
+
+    // The kernel image, section by section. (linker.ld page-aligns them.)
+    let phys = |symbol: *const u8| {
+        VirtAddr::from_ptr(symbol)
+            .to_phys()
+            .expect("kernel is in the linear map")
+    };
+    let text = phys(&raw const __kernel_start);
+    let rodata = phys(&raw const __text_end);
+    let data = phys(&raw const __rodata_end);
+    let end = phys(&raw const __kernel_end);
+    let sections = [
+        (text, rodata, Access::KERNEL_READ_EXECUTE),
+        (rodata, data, Access::KERNEL_READ),
+        (data, end, Access::KERNEL_READ_WRITE),
+    ];
+    for (start, end, access) in sections {
+        map.map(
+            at(start),
+            start,
+            end - start,
+            Attributes::normal(access),
+            false,
+        )?;
+    }
+
+    // All other RAM.
+    let mut ram = *plan.ram;
+    ram.remove(text, end).map_err(|_| MapError::OutOfMemory)?;
+    for (start, end) in ram.iter() {
+        map.map(
+            at(start),
+            start,
+            end - start,
+            Attributes::normal(Access::KERNEL_READ_WRITE),
+            true,
+        )?;
+    }
+
+    for &(start, size) in plan.devices {
+        map.map(
+            at(start),
+            start,
+            size,
+            Attributes::device(Access::KERNEL_READ_WRITE),
+            true,
+        )?;
+    }
+    if let Some((start, size)) = plan.framebuffer {
+        let size = size.next_multiple_of(PAGE_SIZE);
+        map.map(
+            at(start),
+            start,
+            size,
+            Attributes::non_cacheable(Access::KERNEL_READ_WRITE),
+            true,
+        )?;
+    }
+
+    // Make the new tables visible to the table walker, then switch.
+    // SAFETY: a barrier only orders memory accesses.
+    unsafe { asm!("dsb ishst", options(nostack)) };
+    let root = map.root().as_usize();
+    crate::irq::without_interrupts(|| {
+        // SAFETY: the new map covers everything the kernel uses (its image,
+        // stack, heap-to-be, the device tree's RAM and the devices), with
+        // the same addresses as the boot map.
+        unsafe { switch_kernel_tables(root) };
+    });
+    set_user_tables(None);
+    *KERNEL_MAP.lock() = Some(map);
+    Ok(())
+}
+
+/// How the kernel map translates `va`.
+pub fn kernel_translate(va: VirtAddr) -> Option<(PhysAddr, Attributes)> {
+    KERNEL_MAP.lock().as_ref()?.translate(va.as_usize())
+}
+
+/// The lower half's table while no address space is active.
+pub fn user_tables_when_idle() -> PhysAddr {
+    VirtAddr::from_ptr(&EMPTY_TABLE)
+        .to_phys()
+        .expect("in the linear map")
+}
+
+/// Point the lower half at `root` (or at nothing), flushing stale
+/// translations. (There are no address space IDs yet, so every switch
+/// flushes the whole TLB.)
+pub fn set_user_tables(root: Option<PhysAddr>) {
+    let root = root.unwrap_or_else(user_tables_when_idle);
+    // SAFETY: `root` is a valid top-level table (an address space's, or
+    // the empty one); the lower half holds no kernel code or data.
+    unsafe {
+        asm!("dsb ishst", "msr ttbr0_el1, {}", "isb", "tlbi vmalle1", "dsb ish", "isb",
+             in(reg) root.as_usize(), options(nostack));
+    }
+}
+
+/// The lower half's current top-level table.
+pub fn user_tables() -> PhysAddr {
+    let ttbr0: u64;
+    // SAFETY: reading TTBR0_EL1 has no side effects.
+    unsafe { asm!("mrs {}, ttbr0_el1", out(reg) ttbr0, options(nomem, nostack)) };
+    PhysAddr::new((ttbr0 & 0x0000_FFFF_FFFF_FFFE) as usize)
+}
+
+/// Flush all translations for the lower half (after unmapping).
+pub fn flush_user_tlb() {
+    // SAFETY: TLB invalidation only discards cached translations.
+    unsafe {
+        asm!(
+            "dsb ishst",
+            "tlbi vmalle1",
+            "dsb ish",
+            "isb",
+            options(nostack)
+        )
+    };
+}
+
+/// A kind of access to check with `probe`.
+#[derive(Clone, Copy)]
+pub enum Probe {
+    KernelRead,
+    KernelWrite,
+    UserRead,
+    UserWrite,
+}
+
+/// Ask the MMU whether an access to `va` would succeed, without making it:
+/// the physical address, or the fault status code (as in an abort's ESR).
+pub fn probe(va: usize, kind: Probe) -> Result<PhysAddr, u8> {
+    let par: u64;
+    // SAFETY: address translation instructions only update PAR_EL1.
+    unsafe {
+        match kind {
+            Probe::KernelRead => {
+                asm!("at s1e1r, {}", "isb", "mrs {}, par_el1", in(reg) va, out(reg) par, options(nostack))
             }
-            let new = (entry & !ATTR_INDEX_MASK) | ATTR_NON_CACHEABLE | EXECUTE_NEVER;
-            // Break-before-make: the architecture requires the old entry to
-            // be removed, and the TLB cleaned, before a different memory type
-            // is installed.
-            (&raw mut (*table)[index]).write_volatile(0);
-            asm!("dsb ishst", "tlbi vaae1is, {}", "dsb ish", in(reg) (index * BLOCK_SIZE) >> 12, options(nostack));
-            (&raw mut (*table)[index]).write_volatile(new);
+            Probe::KernelWrite => {
+                asm!("at s1e1w, {}", "isb", "mrs {}, par_el1", in(reg) va, out(reg) par, options(nostack))
+            }
+            Probe::UserRead => {
+                asm!("at s1e0r, {}", "isb", "mrs {}, par_el1", in(reg) va, out(reg) par, options(nostack))
+            }
+            Probe::UserWrite => {
+                asm!("at s1e0w, {}", "isb", "mrs {}, par_el1", in(reg) va, out(reg) par, options(nostack))
+            }
         }
     }
-    // SAFETY: barriers only order memory accesses and instruction fetch.
-    unsafe { asm!("dsb ishst", "isb", options(nostack)) };
-    // The CPU may have speculatively re-read lines while the range was still
-    // mapped cacheable; drop them now that it isn't.
-    cache::clean_invalidate(start, len);
-    true
+    if par & 1 != 0 {
+        Err(((par >> 1) & 0x3F) as u8)
+    } else {
+        Ok(PhysAddr::new(
+            (par & 0x0000_FFFF_FFFF_F000) as usize | (va & (PAGE_SIZE - 1)),
+        ))
+    }
+}
+
+/// Fault status codes from `probe`, by kind (bits [5:2]).
+pub fn is_translation_fault(status: u8) -> bool {
+    status & 0x3C == 0x04
+}
+
+pub fn is_permission_fault(status: u8) -> bool {
+    status & 0x3C == 0x0C
 }
