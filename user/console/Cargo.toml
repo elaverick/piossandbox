@@ -1,10 +1,10 @@
 [package]
-name = "init"
+name = "console"
 version = "0.1.0"
 edition = "2024"
 publish = false
 
 [dependencies]
 libpios = { path = "../libpios" }
-pios-bootfs = { path = "../../bootfs" }
-pios-abi = { path = "../../abi" }
+pios-pl011 = { path = "../../pl011" }
+pios-textconsole = { path = "../../textconsole" }

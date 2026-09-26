@@ -26,12 +26,12 @@ mod bootimage;
 mod cache;
 mod console;
 mod cpu;
+mod device;
 #[allow(dead_code)] // shared with the host tests, which use more of it
 mod elf;
 mod exception;
 #[allow(dead_code)] // shared with the host tests, which use more of it
 mod fdt;
-mod font;
 mod framebuffer;
 #[allow(dead_code)] // shared with the host tests, which use more of it
 mod frames;
@@ -116,7 +116,6 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     let irq_lines = irq::init(gicd, gicc);
     irq::register(timer::TICK_IRQ, on_tick);
     timer::start_tick();
-    console::enable_interrupts();
     irq::enable();
 
     // From here on this is a thread like any other, taking turns with the
@@ -243,24 +242,18 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
         );
     }
 
-    // Start the system: `init`, from the boot image, starts the rest.
+    // Start the system: `init`, from the boot image, starts the rest. The
+    // console UARTs' input and the display are its from now on; the kernel
+    // only writes its own messages to the UARTs.
     println!();
-    match process::spawn_from_boot_image("init").map(thread::JoinHandle::join) {
+    match process::spawn_init().map(thread::JoinHandle::join) {
         Ok(process::Exit::Code(code)) => println!("[init exited with code {}]", code),
         Ok(process::Exit::Fault(fault)) => println!("[init was stopped: {}]", fault),
         Err(e) => println!("[init could not be started: {}]", e),
     }
-
-    println!();
-    println!("Type something and it will be echoed back.");
-
+    // Nothing more for this thread to do.
     loop {
-        match console::getc() {
-            b'\r' | b'\n' => console::puts("\n"),
-            // Backspace or Delete: step back, blank the character, step back.
-            0x08 | 0x7F => console::puts("\x08 \x08"),
-            c => console::putc(c),
-        }
+        thread::park();
     }
 }
 
@@ -327,9 +320,10 @@ fn self_test() -> Result<(), &'static str> {
 
 /// The timer interrupt: count the tick, and end the running thread's time
 /// slice.
-fn on_tick() {
+fn on_tick(_id: u32) {
     timer::handle_tick();
     thread::tick();
+    device::tick();
 }
 
 /// The device tree the firmware left at `phys`, if there is a valid one
@@ -364,6 +358,7 @@ pub fn halt() -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    framebuffer::take_back();
     println!("\n*** KERNEL PANIC: {}", info.message());
     if let Some(location) = info.location() {
         println!("    at {}", location);

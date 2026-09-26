@@ -8,31 +8,15 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::addr::PhysAddr;
-use crate::font;
-use crate::mailbox::{self, Mailbox, Message};
+use crate::sync::SpinLock;
 
-/// The largest display we support (4K).
-const MAX_WIDTH: usize = 4096;
-const MAX_HEIGHT: usize = 2160;
+use pios_textconsole::{MAX_HEIGHT, MAX_WIDTH, Surface, TextConsole};
+
+use crate::addr::PhysAddr;
+use crate::mailbox::{self, Mailbox, Message};
 
 /// Used if the firmware can't tell us the display's native resolution.
 const DEFAULT_SIZE: (u32, u32) = (1024, 768);
-
-/// Light grey on black.
-///
-/// Pixels are 32 bits with red in the low byte, then green, blue and alpha,
-/// as the Linux driver for this framebuffer (bcm2708_fb) sets them up. The
-/// firmware's alpha mode is not something we choose, and in one of the
-/// documented modes 0 is opaque, so the alpha byte is left at 0 as Linux's
-/// console does. Red, green and blue are equal for now, so the colours are
-/// right even if a display has red and blue swapped.
-const FOREGROUND: u32 = rgb(0xC0, 0xC0, 0xC0);
-const BACKGROUND: u32 = rgb(0, 0, 0);
-
-const fn rgb(red: u8, green: u8, blue: u8) -> u32 {
-    red as u32 | (green as u32) << 8 | (blue as u32) << 16
-}
 
 /// A 32 bits-per-pixel framebuffer.
 #[derive(Clone, Copy)]
@@ -46,13 +30,6 @@ pub struct FrameBuffer {
 }
 
 impl FrameBuffer {
-    const NONE: FrameBuffer = FrameBuffer {
-        base: PhysAddr::new(0),
-        width: 0,
-        height: 0,
-        pitch: 0,
-    };
-
     /// Ask the firmware for a framebuffer at the display's native resolution.
     /// Returns it and the size of the buffer the firmware allocated. Nothing
     /// may draw on it until the kernel map covers it (see `start`).
@@ -125,166 +102,24 @@ impl FrameBuffer {
         self.base
     }
 
-    /// Fill `count` pixels starting at (x, y), within one row.
-    fn fill_span(&self, x: usize, y: usize, count: usize, color: u32) {
-        let row = (self.base.to_virt() + y * self.pitch + x * 4).as_ptr::<u32>();
-        for i in 0..count {
-            // SAFETY: callers keep (x + count, y) within the framebuffer the
-            // firmware allocated for us. Framebuffer memory is shared with
-            // the GPU, so writes must not be elided.
-            unsafe { row.add(i).write_volatile(color) };
+    /// A surface for drawing on it through the kernel map.
+    fn surface(&self) -> Surface {
+        // SAFETY: the kernel map covers the framebuffer (see `start`), which
+        // is the firmware's and holds no Rust data, and `allocate` checked
+        // its size, alignment and pitch.
+        unsafe {
+            Surface::new(
+                self.base.to_virt().as_ptr(),
+                self.width,
+                self.height,
+                self.pitch,
+            )
         }
     }
 
-    fn clear(&self, color: u32) {
-        for y in 0..self.height {
-            self.fill_span(0, y, self.width, color);
-        }
-    }
-}
-
-const MAX_COLUMNS: usize = MAX_WIDTH / font::WIDTH;
-const MAX_ROWS: usize = MAX_HEIGHT / font::HEIGHT;
-
-/// A text console on a framebuffer.
-///
-/// A copy of the characters on screen is kept in `grid`, so that nothing
-/// ever reads the framebuffer back (it isn't cached, so reads are slow) and
-/// scrolling only redraws the cells whose character changes: most of a text
-/// screen is blank.
-struct TextConsole {
-    fb: FrameBuffer,
-    /// Each font pixel is drawn as a `scale` x `scale` square.
-    scale: usize,
-    columns: usize,
-    rows: usize,
-    /// Cursor position. `x` may equal `columns`, meaning the line is full and
-    /// the next printable character wraps.
-    x: usize,
-    y: usize,
-    /// The character in each cell; 0 is blank.
-    grid: [u8; MAX_COLUMNS * MAX_ROWS],
-}
-
-impl TextConsole {
-    /// All zeros, so that the static lives in .bss rather than in the image.
-    const INACTIVE: TextConsole = TextConsole {
-        fb: FrameBuffer::NONE,
-        scale: 0,
-        columns: 0,
-        rows: 0,
-        x: 0,
-        y: 0,
-        grid: [0; MAX_COLUMNS * MAX_ROWS],
-    };
-
-    fn start(&mut self, fb: FrameBuffer) {
-        // Double the font size on large displays so it stays readable.
-        self.scale = if fb.width >= 1600 { 2 } else { 1 };
-        self.columns = fb.width / (font::WIDTH * self.scale);
-        self.rows = fb.height / (font::HEIGHT * self.scale);
-        self.x = 0;
-        self.y = 0;
-        self.grid[..self.columns * self.rows].fill(0);
-        self.fb = fb;
-        fb.clear(BACKGROUND);
-        self.draw_cursor(true);
-    }
-
-    fn active(&self) -> bool {
-        self.fb.base.as_usize() != 0
-    }
-
-    fn putc(&mut self, byte: u8) {
-        self.draw_cursor(false);
-        match byte {
-            b'\n' => self.newline(),
-            b'\r' => self.x = 0,
-            0x08 => self.x = self.x.saturating_sub(1),
-            b'\t' => {
-                for _ in 0..8 - self.x % 8 {
-                    self.print(b' ');
-                }
-            }
-            0x00..=0x1F | 0x7F => {} // other control characters: ignore
-            _ => self.print(byte),
-        }
-        self.draw_cursor(true);
-    }
-
-    fn print(&mut self, byte: u8) {
-        if self.x >= self.columns {
-            self.newline();
-        }
-        self.grid[self.y * self.columns + self.x] = byte;
-        self.draw_cell(self.x, self.y, byte, false);
-        self.x += 1;
-    }
-
-    fn newline(&mut self) {
-        self.x = 0;
-        if self.y + 1 < self.rows {
-            self.y += 1;
-        } else {
-            self.scroll();
-        }
-    }
-
-    /// Move everything up a line, redrawing only the cells that change.
-    fn scroll(&mut self) {
-        let columns = self.columns;
-        for row in 0..self.rows {
-            for column in 0..columns {
-                let new = if row + 1 < self.rows {
-                    self.grid[(row + 1) * columns + column]
-                } else {
-                    0
-                };
-                let cell = &mut self.grid[row * columns + column];
-                if *cell != new {
-                    *cell = new;
-                    self.draw_cell(column, row, new, false);
-                }
-            }
-        }
-    }
-
-    /// Show or hide the cursor, an underline in the cursor's cell.
-    fn draw_cursor(&mut self, visible: bool) {
-        if self.x < self.columns {
-            let byte = self.grid[self.y * self.columns + self.x];
-            self.draw_cell(self.x, self.y, byte, visible);
-        }
-    }
-
-    fn draw_cell(&self, column: usize, row: usize, byte: u8, cursor: bool) {
-        const BLANK: [u8; font::HEIGHT] = [0; font::HEIGHT];
-        let glyph = match byte {
-            0 | b' ' => &BLANK,
-            font::FIRST..=font::LAST => &font::GLYPHS[(byte - font::FIRST) as usize],
-            _ => &font::GLYPHS[(b'?' - font::FIRST) as usize],
-        };
-        let scale = self.scale;
-        let left = column * font::WIDTH * scale;
-        let top = row * font::HEIGHT * scale;
-        for (gy, &bits) in glyph.iter().enumerate() {
-            let bits = if cursor && gy >= font::HEIGHT - 2 {
-                0xFF
-            } else {
-                bits
-            };
-            for sy in 0..scale {
-                let y = top + gy * scale + sy;
-                for gx in 0..font::WIDTH {
-                    let color = if bits & (0x80 >> gx) != 0 {
-                        FOREGROUND
-                    } else {
-                        BACKGROUND
-                    };
-                    self.fb.fill_span(left + gx * scale, y, scale, color);
-                }
-            }
-        }
+    /// Bytes from one row of pixels to the next.
+    pub fn pitch(&self) -> usize {
+        self.pitch
     }
 }
 
@@ -344,11 +179,12 @@ pub fn count_displays(mailbox: Mailbox) -> Option<u32> {
 /// Start the display console on `fb`, which the kernel map must cover.
 pub fn start(fb: FrameBuffer, displays: Option<u32>) -> Option<DisplayInfo> {
     CONSOLE.with(|console| {
-        console.start(fb);
+        console.start(fb.surface());
+        *DISPLAY.lock() = Some(fb);
         DisplayInfo {
             fb,
-            columns: console.columns,
-            rows: console.rows,
+            columns: console.columns(),
+            rows: console.rows(),
             displays,
         }
     })
@@ -356,9 +192,50 @@ pub fn start(fb: FrameBuffer, displays: Option<u32>) -> Option<DisplayInfo> {
 
 /// Write one byte to the display console, if there is one.
 pub fn putc(byte: u8) {
-    CONSOLE.with(|console| {
-        if console.active() {
-            console.putc(byte);
-        }
-    });
+    CONSOLE.with(|console| console.putc(byte));
+}
+
+/// The framebuffer the kernel's console draws on (or drew on, before
+/// handing it over).
+static DISPLAY: SpinLock<Option<FrameBuffer>> = SpinLock::new(None);
+
+/// What was on the screen when the kernel handed it over.
+pub struct Handover {
+    pub fb: FrameBuffer,
+    /// The character in each cell, row by row (0 for blank).
+    pub text: alloc::vec::Vec<u8>,
+    pub columns: usize,
+    pub rows: usize,
+    pub cursor: (usize, usize),
+}
+
+/// Stop drawing on the display, so the console server can take it over,
+/// and say what is on it. `None` if there is no display.
+pub fn hand_over() -> Option<Handover> {
+    let fb = (*DISPLAY.lock())?;
+    CONSOLE
+        .with(|console| {
+            let handover = Handover {
+                fb,
+                text: console.text().to_vec(),
+                columns: console.columns(),
+                rows: console.rows(),
+                cursor: console.cursor(),
+            };
+            console.stop();
+            handover
+        })
+        .filter(|handover| !handover.text.is_empty())
+}
+
+/// For a kernel panic after the hand-over: take the display back (clearing
+/// it), so the report is seen even with only a screen attached.
+pub fn take_back() {
+    if let Some(fb) = *DISPLAY.lock() {
+        CONSOLE.with(|console| {
+            if !console.active() {
+                console.start(fb.surface());
+            }
+        });
+    }
 }

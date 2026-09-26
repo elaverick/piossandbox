@@ -4,6 +4,7 @@
 use alloc::collections::BTreeMap;
 
 use crate::addr::{PAGE_SIZE, PhysAddr, VirtAddr};
+use crate::device::Memory;
 use crate::memory::OwnedFrame;
 use crate::mmu::{self, KernelTableMemory};
 use crate::paging::{Access, Attributes, HALF_SIZE, Half, MapError, PageTable};
@@ -118,6 +119,23 @@ impl AddressSpace {
             Attributes::normal(Access::USER_READ),
             false,
         )
+    }
+
+    /// Map `memory` at `va`. Like `map_static`, the address space doesn't
+    /// own it.
+    pub fn map_memory(&mut self, va: usize, memory: &Memory) -> Result<(), MapError> {
+        match *memory {
+            Memory::Static(data) => self.map_static(va, data),
+            Memory::Physical {
+                base,
+                size,
+                attributes,
+            } => {
+                assert!(attributes.access().is_user());
+                Self::check(va, size / PAGE_SIZE)?;
+                self.table.map(va, base, size, attributes, false)
+            }
+        }
     }
 
     /// Copy `data` into this address space at `va` (through the kernel's

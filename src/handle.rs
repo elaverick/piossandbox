@@ -9,6 +9,7 @@ use alloc::collections::BTreeMap;
 
 use pios_abi::rights;
 
+use crate::device::{Interrupt, MEMORY_RIGHTS, Memory, Timer};
 use crate::ipc::{EndpointRef, ReplyCap};
 use crate::thread::JoinHandle;
 
@@ -23,6 +24,13 @@ pub enum Handle {
     Endpoint(EndpointRef),
     /// The way to answer one call.
     Reply(ReplyCap),
+    /// Memory the holder may map.
+    Memory(Memory),
+    /// Ownership of an interrupt.
+    Interrupt(Interrupt),
+    /// A periodic notification; closing the handle stops it (which is all
+    /// the handle is for: holding it keeps the timer going).
+    Timer(#[allow(dead_code)] Timer),
 }
 
 impl Handle {
@@ -31,7 +39,8 @@ impl Handle {
         match self {
             Handle::Process(_) => rights::WAIT | rights::TRANSFER,
             Handle::Endpoint(endpoint) => endpoint.rights(),
-            Handle::Reply(_) => rights::TRANSFER,
+            Handle::Reply(_) | Handle::Interrupt(_) | Handle::Timer(_) => rights::TRANSFER,
+            Handle::Memory(_) => MEMORY_RIGHTS,
         }
     }
 

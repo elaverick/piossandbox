@@ -1,7 +1,7 @@
 # User programs for pios. Built by the kernel's build.rs, which embeds them
 # in the kernel image (until programs are loaded from an initramfs).
 [workspace]
-members = ["libpios", "init", "hello", "usertest", "crashtest", "fptest", "ipctest"]
+members = ["libpios", "init", "console", "echo", "hello", "usertest", "crashtest", "fptest", "ipctest"]
 resolver = "3"
 
 [profile.dev]

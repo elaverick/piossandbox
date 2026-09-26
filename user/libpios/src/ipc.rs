@@ -77,6 +77,30 @@ impl Handle {
     }
 }
 
+impl Handle {
+    /// Map the memory this handle refers to at `address` (page-aligned).
+    pub fn map(&self, address: usize) -> Result<(), Error> {
+        syscall(call::MAP, self.0, address, 0).map(|_| ())
+    }
+
+    /// Deliver this interrupt to `endpoint` as notifications with `badge`,
+    /// and enable it.
+    pub fn bind_interrupt(&self, endpoint: &Handle, badge: u64) -> Result<(), Error> {
+        syscall(call::INTERRUPT_BIND, self.0, endpoint.0, badge as usize).map(|_| ())
+    }
+
+    /// This interrupt has been dealt with: unmask it.
+    pub fn acknowledge_interrupt(&self) -> Result<(), Error> {
+        syscall(call::INTERRUPT_ACK, self.0, 0, 0).map(|_| ())
+    }
+}
+
+/// Notify `endpoint` with `badge` every `period_ms` milliseconds, until the
+/// returned handle is dropped.
+pub fn timer(endpoint: &Handle, badge: u64, period_ms: u64) -> Result<Handle, Error> {
+    syscall(call::TIMER, endpoint.0, badge as usize, period_ms as usize).map(Handle)
+}
+
 impl Drop for Handle {
     fn drop(&mut self) {
         close_raw(self.0);

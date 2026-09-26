@@ -32,11 +32,30 @@ pub fn init(distributor: PhysAddr, cpu_interface: PhysAddr) -> u32 {
     gic().init()
 }
 
-/// Call `handler` (in interrupt context) whenever interrupt `id` fires, and
-/// enable it.
-pub fn register(id: u32, handler: fn()) {
-    HANDLERS[id as usize].store(handler as *mut (), Ordering::Release);
+/// Call `handler` (in interrupt context, with the interrupt's ID) whenever
+/// interrupt `id` fires, and enable it.
+pub fn register(id: u32, handler: fn(u32)) {
+    set_handler(id, handler);
     gic().enable(id);
+}
+
+/// Make `handler` the one for interrupt `id`, leaving it enabled or not.
+pub fn set_handler(id: u32, handler: fn(u32)) {
+    HANDLERS[id as usize].store(handler as *mut (), Ordering::Release);
+}
+
+/// Let interrupt `id` through, or not, at the interrupt controller.
+pub fn set_enabled(id: u32, enabled: bool) {
+    if enabled {
+        gic().enable(id);
+    } else {
+        gic().disable(id);
+    }
+}
+
+/// Whether `id` is a valid interrupt ID.
+pub fn valid(id: u32) -> bool {
+    (id as usize) < MAX_IDS
 }
 
 /// Unmask IRQs on this core.
@@ -96,9 +115,10 @@ pub fn handle() {
             gic.disable(id);
             UNEXPECTED.store(unexpected() + 1, Ordering::Relaxed);
         } else {
-            // SAFETY: only `register` stores into HANDLERS, always a `fn()`.
-            let handler: fn() = unsafe { core::mem::transmute(handler) };
-            handler();
+            // SAFETY: only `set_handler` stores into HANDLERS, always a
+            // `fn(u32)`.
+            let handler: fn(u32) = unsafe { core::mem::transmute(handler) };
+            handler(id);
         }
         gic.end(iar);
     }

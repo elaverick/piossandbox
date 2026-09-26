@@ -66,9 +66,9 @@ check "address spaces, user mode, threads and IPC OK" "exception, interrupt, mem
 check "Hello from user space!" "a user program runs and prints"
 check "[hello exited with code 0]" "the user program exits back to the kernel"
 check "init: starting the system from a boot image" "the kernel starts init from the boot image"
-check "[init exited with code 0]" "init starts hello, waits for it and exits cleanly"
-check "Type something" "kernel reaches echo loop"
-check "$INPUT" "kernel echoes input"
+check "init: the console server has" "init hands the hardware to the console server"
+check "Type something" "the echo program starts, through the console server"
+check "$INPUT" "typed input is echoed, through the console server"
 expected_burst=$(for i in $(seq -w 1 300); do echo "burst $i abcdefghijklmnopqrstuvwxyz"; done)
 if [[ $(tr -d '\r' <"$out" | grep -a "^burst ") == "$expected_burst" ]]; then
     pass "a 12 KB burst of input arrives intact"

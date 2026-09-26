@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Generate src/font.rs from a fixed-width 8-pixel-wide BDF font.
+"""Generate textconsole/src/font.rs from a fixed-width 8-pixel-wide BDF font.
 
-    tools/font/gen-font.py tools/font/spleen-8x16.bdf > src/font.rs
+    tools/font/gen-font.py tools/font/spleen-8x16.bdf > textconsole/src/font.rs
 
 Only printable ASCII (0x20-0x7E) is kept. Each glyph becomes HEIGHT bytes,
 one per row, most significant bit = leftmost pixel.

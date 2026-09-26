@@ -16,6 +16,11 @@
 //! side can never be answered, so they are woken with `PeerGone`: as with
 //! Rust's channels, dropping one end wakes the other.
 //!
+//! Interrupts and timers *notify* an endpoint instead of sending to it: the
+//! kernel can't wait for a receiver, so notifications are ORed into a word
+//! of pending badges, which the next receive picks up as one message. That
+//! works from interrupt context: it allocates nothing and drops nothing.
+//!
 //! Anything that owns handles (a message, a reply capability) can run
 //! arbitrary handle-closing code when dropped, including code that locks an
 //! endpoint. So nothing here is dropped while an endpoint's lock is held.
@@ -107,6 +112,8 @@ struct State {
     /// Open handles with the `SEND` and `RECEIVE` rights.
     send_handles: usize,
     receive_handles: usize,
+    /// Badges of notifications not yet received, ORed together.
+    notifications: u64,
 }
 
 pub struct Endpoint {
@@ -129,6 +136,7 @@ impl Endpoint {
                 receivers: VecDeque::new(),
                 send_handles: 0,
                 receive_handles: 0,
+                notifications: 0,
             }),
         })
     }
@@ -174,9 +182,27 @@ impl Endpoint {
         }
     }
 
+    /// Notify the endpoint with `badge`: wake a waiting receiver with a
+    /// notification, or leave it pending for the next one. Safe to call
+    /// from interrupt handlers.
+    pub fn notify(&self, badge: u64) {
+        let mut state = self.state.lock();
+        match state.receivers.pop_front() {
+            Some(receiver) => {
+                drop(state);
+                receiver.complete(Outcome::Delivered(notification(badge)));
+            }
+            None => state.notifications |= badge,
+        }
+    }
+
     /// Wait for a message.
     pub fn receive(&self) -> Result<Delivery, Error> {
         let mut state = self.state.lock();
+        if state.notifications != 0 {
+            let badge = core::mem::take(&mut state.notifications);
+            return Ok(notification(badge));
+        }
         if let Some(pending) = state.senders.pop_front() {
             drop(state);
             let reply = if pending.call {
@@ -202,6 +228,19 @@ impl Endpoint {
             Outcome::Failed(error) => Err(error),
             _ => unreachable!("a receiver was not given a message"),
         }
+    }
+}
+
+/// The message a notification with `badge` arrives as.
+fn notification(badge: u64) -> Delivery {
+    Delivery {
+        message: Message {
+            label: pios_abi::NOTIFY,
+            data: [0; MESSAGE_WORDS],
+            handle: None,
+        },
+        badge,
+        reply: None,
     }
 }
 

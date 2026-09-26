@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 
 use pios_abi::{Error, ExitStatus, MESSAGE_SIZE, Message, call, rights};
 
+use crate::device::Timer;
 use crate::exception::TrapFrame;
 use crate::handle::Handle;
 use crate::ipc::{self, Endpoint, EndpointRef, ReplyCap};
@@ -40,6 +41,10 @@ pub fn handle(frame: &mut TrapFrame) {
         call::CALL => send(args[0], args[1], true),
         call::RECEIVE => receive(args[0], args[1]),
         call::REPLY => reply(args[0], args[1]),
+        call::MAP => map(args[0], args[1]),
+        call::INTERRUPT_BIND => interrupt_bind(args[0], args[1], args[2] as u64),
+        call::INTERRUPT_ACK => interrupt_ack(args[0]),
+        call::TIMER => timer(args[0], args[1] as u64, args[2] as u64),
         _ => Err(Error::NoSuchCall),
     };
     frame.x[0] = match result {
@@ -307,4 +312,74 @@ fn reply(number: usize, addr: usize) -> Result<usize, Error> {
         _ => unreachable!("checked above, and only this thread changes the table"),
     }
     Ok(0)
+}
+
+/// `map(memory, address)`: map memory the caller holds a handle to.
+fn map(number: usize, va: usize) -> Result<usize, Error> {
+    let caller = caller();
+    let memory = match caller.handles().lock().get(number) {
+        Some(Handle::Memory(memory)) => *memory,
+        Some(_) => return Err(Error::BadHandle),
+        None => return Err(Error::BadHandle),
+    };
+    let result = caller.space().lock().map_memory(va, &memory);
+    match result {
+        Ok(()) => Ok(0),
+        Err(MapError::OutOfMemory) => Err(Error::OutOfMemory),
+        Err(_) => Err(Error::InvalidArgument),
+    }
+}
+
+/// A new reference to endpoint handle `number` for the kernel to notify
+/// through: the handle needs `SEND`.
+fn notifier(process: &Process, number: usize) -> Result<EndpointRef, Error> {
+    let (endpoint, _) = endpoint_with(process, number, rights::SEND)?;
+    Ok(EndpointRef::new(endpoint, rights::SEND, 0))
+}
+
+/// `interrupt_bind(interrupt, endpoint, badge)`.
+fn interrupt_bind(number: usize, endpoint: usize, badge: u64) -> Result<usize, Error> {
+    let caller = caller();
+    if !matches!(
+        caller.handles().lock().get(number),
+        Some(Handle::Interrupt(_))
+    ) {
+        return Err(Error::BadHandle);
+    }
+    if badge == 0 {
+        return Err(Error::InvalidArgument);
+    }
+    let endpoint = notifier(&caller, endpoint)?;
+    match caller.handles().lock().get(number) {
+        Some(Handle::Interrupt(interrupt)) => interrupt.bind(endpoint, badge),
+        _ => unreachable!("checked above, and only this thread changes the table"),
+    }
+    Ok(0)
+}
+
+/// `interrupt_ack(interrupt)`.
+fn interrupt_ack(number: usize) -> Result<usize, Error> {
+    match caller().handles().lock().get(number) {
+        Some(Handle::Interrupt(interrupt)) => {
+            interrupt.acknowledge();
+            Ok(0)
+        }
+        _ => Err(Error::BadHandle),
+    }
+}
+
+/// `timer(endpoint, badge, period_ms)`.
+fn timer(endpoint: usize, badge: u64, period_ms: u64) -> Result<usize, Error> {
+    let caller = caller();
+    if badge == 0 || period_ms == 0 {
+        return Err(Error::InvalidArgument);
+    }
+    if !caller.handles().lock().has_room(1) {
+        return Err(Error::OutOfMemory);
+    }
+    let endpoint = notifier(&caller, endpoint)?;
+    insert(
+        &caller,
+        Handle::Timer(Timer::start(endpoint, badge, period_ms)),
+    )
 }

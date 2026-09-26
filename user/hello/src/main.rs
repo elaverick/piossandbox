@@ -11,6 +11,10 @@ libpios::pios_main!(main);
 static PRIMES_BELOW: u32 = 100;
 
 fn main() -> i32 {
+    // init starts us with a handle to the console server.
+    if let Some(console) = libpios::start_handle() {
+        libpios::console::connect(console);
+    }
     println!("Hello from user space!");
     let mut primes = [0u32; 32];
     let mut count = 0;

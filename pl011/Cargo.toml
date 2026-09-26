@@ -1,0 +1,8 @@
+[package]
+name = "pios-pl011"
+version = "0.1.0"
+edition = "2024"
+description = "Driver for the ARM PL011 UART, shared by the kernel and the console server"
+publish = false
+
+[dependencies]

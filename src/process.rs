@@ -11,10 +11,13 @@
 use alloc::sync::Arc;
 use core::fmt;
 
+use pios_abi::{BOOT_INFO_MAGIC, BootInfo, DisplayInfo};
+
 use crate::addr::PAGE_SIZE;
 use crate::addrspace::{AddressSpace, USER_END, USER_START};
 use crate::bootimage;
 use crate::cache;
+use crate::device::{Interrupt, Memory, leak_pages};
 use crate::elf::{Elf, ElfError};
 use crate::exception::{KIND, Syndrome, TrapFrame};
 use crate::handle::{Handle, HandleTable};
@@ -27,9 +30,13 @@ use crate::thread::{self, JoinHandle};
 pub const STACK_TOP: usize = 0x40_0000_0000;
 pub const STACK_PAGES: usize = 16;
 
-/// Where `init` finds the boot image (read-only): the argument to its entry
-/// point.
+/// Where programs started from the boot image find it (read-only).
 pub const BOOT_IMAGE_ADDR: usize = 0x10_0000_0000;
+/// Where `init` finds its `BootInfo` (read-only): the argument to its entry
+/// point.
+pub const BOOT_INFO_ADDR: usize = 0x0F_FFFF_0000;
+
+const _: () = assert!(core::mem::size_of::<BootInfo>() <= PAGE_SIZE);
 
 /// Why a program stopped.
 #[derive(Clone, Copy, Debug)]
@@ -103,7 +110,7 @@ impl From<MapError> for LoadError {
 
 /// A user program's process: its address space, shared by its thread(s).
 pub struct Process {
-    space: AddressSpace,
+    space: SpinLock<AddressSpace>,
     handles: SpinLock<HandleTable>,
 }
 
@@ -136,13 +143,15 @@ impl Process {
             Access::USER_READ_WRITE,
         )?;
         let process = Process {
-            space,
+            space: SpinLock::new(space),
             handles: SpinLock::new(HandleTable::new()),
         };
         Ok((process, elf.entry() as usize))
     }
 
-    pub fn space(&self) -> &AddressSpace {
+    /// The address space. (Only this process's own thread changes it, once
+    /// it runs.)
+    pub fn space(&self) -> &SpinLock<AddressSpace> {
         &self.space
     }
 
@@ -171,11 +180,83 @@ pub fn spawn(
 pub fn spawn_from_boot_image(name: &'static str) -> Result<JoinHandle, LoadError> {
     let image = bootimage::image();
     let program = image.find(name).ok_or(LoadError::Missing)?;
-    let (mut process, entry) = Process::load(program.data)?;
+    let (process, entry) = Process::load(program.data)?;
     process
         .space
+        .lock()
         .map_static(BOOT_IMAGE_ADDR, image.as_bytes())?;
     start(name, process, entry, BOOT_IMAGE_ADDR, None)
+}
+
+/// Start `init`: with the boot image mapped as for `spawn_from_boot_image`,
+/// and handles to the console UARTs and the display, which the kernel stops
+/// using. What they are is described in a `BootInfo` page mapped read-only
+/// at `BOOT_INFO_ADDR`, which is `init`'s argument.
+pub fn spawn_init() -> Result<JoinHandle, LoadError> {
+    let image = bootimage::image();
+    let program = image.find("init").ok_or(LoadError::Missing)?;
+    let (process, entry) = Process::load(program.data)?;
+    let mut info = BootInfo {
+        magic: BOOT_INFO_MAGIC,
+        boot_image: BOOT_IMAGE_ADDR as u64,
+        boot_image_size: image.as_bytes().len() as u64,
+        ..BootInfo::default()
+    };
+    {
+        let mut space = process.space.lock();
+        space.map_static(BOOT_IMAGE_ADDR, image.as_bytes())?;
+        let mut handles = process.handles.lock();
+        let mut give = |handle| {
+            let number = handles.insert(handle);
+            number.unwrap_or_else(|_| unreachable!("a new handle table has room")) as u64
+        };
+
+        for (slot, (base, irq)) in info
+            .uarts
+            .iter_mut()
+            .zip(crate::console::uarts_to_hand_over())
+        {
+            // SAFETY: a UART's registers are device memory, one page.
+            let memory = unsafe { Memory::device(base, PAGE_SIZE) };
+            slot.size = memory.size() as u64;
+            slot.memory = give(Handle::Memory(memory));
+            if let Some(interrupt) = irq.and_then(Interrupt::claim) {
+                slot.interrupt = give(Handle::Interrupt(interrupt));
+            }
+        }
+
+        if let Some(display) = crate::framebuffer::hand_over() {
+            let (base, size) = display.fb.memory();
+            // SAFETY: the firmware's framebuffer, which the frame allocator
+            // never hands out.
+            let memory = unsafe { Memory::framebuffer(base, size) };
+            let text = leak_pages(&display.text);
+            info.display = DisplayInfo {
+                size: memory.size() as u64,
+                memory: give(Handle::Memory(memory)),
+                width: display.fb.width() as u64,
+                height: display.fb.height() as u64,
+                pitch: display.fb.pitch() as u64,
+                text_size: display.text.len() as u64,
+                text: give(Handle::Memory(Memory::Static(text))),
+                columns: display.columns as u64,
+                rows: display.rows as u64,
+                cursor_x: display.cursor.0 as u64,
+                cursor_y: display.cursor.1 as u64,
+            };
+        }
+
+        space.allocate(BOOT_INFO_ADDR, 1, Access::USER_READ)?;
+        // SAFETY: BootInfo is plain old data: repr(C), all u64s, no padding.
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                (&raw const info).cast::<u8>(),
+                core::mem::size_of::<BootInfo>(),
+            )
+        };
+        space.write(BOOT_INFO_ADDR, bytes)?;
+    }
+    start("init", process, entry, BOOT_INFO_ADDR, None)
 }
 
 fn start(

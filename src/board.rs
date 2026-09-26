@@ -124,8 +124,9 @@ mod pi4 {
                 _ => DEFAULT_CLOCK_HZ,
             };
 
-        let uart0 = Pl011::new(UART0_BASE);
-        uart0.init(clock_hz, uart::BAUD_RATE);
+        // SAFETY: UART0 is a PL011, among the Pi 4's devices.
+        let uart0 = unsafe { uart::at(UART0_BASE) };
+        uart::init(uart0, clock_hz, uart::BAUD_RATE);
         let info = ConsoleUart {
             name: "UART0 on GPIO 14/15",
             clock_hz: Some(clock_hz),
@@ -168,8 +169,9 @@ mod pi5 {
     const RP1_UART0_BASE: PhysAddr = PhysAddr::new(0x1F_0003_0000);
 
     pub fn init_console() -> [Option<(Pl011, ConsoleUart)>; 2] {
-        let debug = Pl011::new(DEBUG_UART_BASE);
-        debug.init(DEBUG_UART_CLOCK_HZ, uart::BAUD_RATE);
+        // SAFETY: the debug UART is a PL011, among the Pi 5's devices.
+        let debug = unsafe { uart::at(DEBUG_UART_BASE) };
+        uart::init(debug, DEBUG_UART_CLOCK_HZ, uart::BAUD_RATE);
         let debug_info = ConsoleUart {
             name: "debug UART connector",
             clock_hz: Some(DEBUG_UART_CLOCK_HZ),
@@ -181,7 +183,9 @@ mod pi5 {
         // makes the firmware set up UART0 and its pins at 115200 baud; RP1's
         // clocks are not ours to reprogram yet, so we keep its settings.
         let rp1 = if rp1_link_up() {
-            let uart0 = Pl011::new(RP1_UART0_BASE);
+            // SAFETY: RP1's UART0 is a PL011, among the Pi 5's devices (and
+            // only touched once the PCIe link to RP1 is up).
+            let uart0 = unsafe { uart::at(RP1_UART0_BASE) };
             if uart0.is_configured() {
                 uart0.enable();
                 // RP1's interrupts reach the GIC as PCIe MSIs, which we

@@ -4,7 +4,7 @@
     scripts/screen-text.py screen.ppm
     scripts/screen-text.py screen.ppm --compare serial.txt
 
-Each character cell is matched exactly against the glyphs in src/font.rs.
+Each character cell is matched exactly against the glyphs in textconsole/src/font.rs.
 The cursor (an underline) is ignored; unrecognised cells come out as '?'.
 
 With --compare, the serial console transcript is replayed through a simple
@@ -15,7 +15,7 @@ import re
 import sys
 from pathlib import Path
 
-FONT_RS = Path(__file__).resolve().parent.parent / "src" / "font.rs"
+FONT_RS = Path(__file__).resolve().parent.parent / "textconsole" / "src" / "font.rs"
 
 
 def load_font():

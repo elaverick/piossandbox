@@ -404,7 +404,7 @@ pub fn spawn_user(
         ))
     };
     let context = Context::new(user_thread_start, 0, frame as usize, kernel_stack.bottom());
-    let tables = process.space().root();
+    let tables = process.space().lock().root();
     Ok(with_scheduler(|s| {
         new_thread(s, name, context, kernel_stack, Some(process), tables)
     }))

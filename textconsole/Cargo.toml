@@ -1,0 +1,8 @@
+[package]
+name = "pios-textconsole"
+version = "0.1.0"
+edition = "2024"
+description = "A text console drawn on a 32-bit framebuffer, shared by the kernel and the console server"
+publish = false
+
+[dependencies]

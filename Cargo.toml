@@ -14,6 +14,8 @@ bench = false
 [dependencies]
 pios-abi = { path = "abi" }
 pios-bootfs = { path = "bootfs" }
+pios-pl011 = { path = "pl011" }
+pios-textconsole = { path = "textconsole" }
 
 [build-dependencies]
 pios-bootfs = { path = "bootfs", features = ["builder"] }

@@ -25,9 +25,10 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use pios_abi::call;
 pub use pios_abi::{Error, ExitStatus, MESSAGE_WORDS, rights};
 
+pub mod console;
 mod ipc;
 use ipc::close_raw;
-pub use ipc::{Handle, Message, Received, Reply, endpoint};
+pub use ipc::{Handle, Message, Received, Reply, endpoint, timer};
 
 /// Make a system call with up to three arguments.
 fn syscall(number: usize, a0: usize, a1: usize, a2: usize) -> Result<usize, Error> {
@@ -144,19 +145,54 @@ pub fn spawn(image: &[u8], arg: usize, handle: Option<Handle>) -> Result<Child, 
     })
 }
 
+/// A static that the program can borrow mutably once, for data too big for
+/// the stack. `take` hands out the only `&'static mut` there will ever be.
+pub struct TakeOnce<T> {
+    taken: core::sync::atomic::AtomicBool,
+    value: core::cell::UnsafeCell<T>,
+}
+
+// SAFETY: at most one reference to the value is ever handed out.
+unsafe impl<T: Send> Sync for TakeOnce<T> {}
+
+impl<T> TakeOnce<T> {
+    pub const fn new(value: T) -> TakeOnce<T> {
+        TakeOnce {
+            taken: core::sync::atomic::AtomicBool::new(false),
+            value: core::cell::UnsafeCell::new(value),
+        }
+    }
+
+    /// The value, the first time; `None` after that.
+    // Handing out `&mut` from `&self` is the point, and sound: `taken`
+    // makes sure it happens at most once.
+    #[allow(clippy::mut_from_ref)]
+    pub fn take(&'static self) -> Option<&'static mut T> {
+        if self.taken.swap(true, Ordering::Acquire) {
+            return None;
+        }
+        // SAFETY: `taken` makes this the only reference ever made.
+        Some(unsafe { &mut *self.value.get() })
+    }
+}
+
 /// Make a raw system call, for testing the kernel's argument checking.
 pub fn raw_syscall(number: usize, a0: usize, a1: usize, a2: usize) -> Result<usize, Error> {
     syscall(number, a0, a1, a2)
 }
 
-/// `core::fmt` output to the debug console.
+/// `core::fmt` output: to the console server once [`console::connect`] has
+/// been called, else to the kernel's debug console.
 pub struct Console;
 
 impl fmt::Write for Console {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        debug_write(s.as_bytes())
-            .map(|_| ())
-            .map_err(|_| fmt::Error)
+        let result = if console::is_connected() {
+            console::write(s.as_bytes())
+        } else {
+            debug_write(s.as_bytes()).map(|_| ())
+        };
+        result.map_err(|_| fmt::Error)
     }
 }
 

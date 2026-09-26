@@ -198,6 +198,35 @@ fn parent(image_addr: usize) -> bool {
         raw_syscall(call::REPLY, e.raw(), buffer, 0) == Err(Error::BadHandle),
         "replied through an endpoint",
     );
+
+    // Timers notify: pending notifications collect into one, marked by
+    // their badges, ahead of any waiting message.
+    const TICK: u64 = 1 << 40;
+    const TOCK: u64 = 1 << 41;
+    let tick = libpios::timer(&e, TICK, 10).unwrap();
+    let tock = libpios::timer(&e, TOCK, 10).unwrap();
+    let start = libpios::counter();
+    while libpios::counter() - start < libpios::counter_frequency() / 20 {
+        libpios::yield_now(); // 50 ms: several ticks
+    }
+    let r = e.receive().unwrap();
+    c.check(r.message.label == pios_abi::NOTIFY, "a timer's notification had the wrong label");
+    c.check(r.badge == TICK | TOCK, "pending notifications didn't combine");
+    c.check(r.reply.is_none() && r.message.handle.is_none(), "a notification carried handles");
+    drop(tock);
+    // (Collect anything `tock` sent before it stopped; after that, only
+    // `tick` may notify.)
+    let _ = e.receive().unwrap();
+    let r = e.receive().unwrap();
+    c.check(r.badge == TICK, "a stopped timer still notified");
+    drop(tick);
+    c.check(libpios::timer(&e, 0, 10).err() == Some(Error::InvalidArgument), "a timer without a badge was allowed");
+    c.check(libpios::timer(&receive_only, TICK, 10).err() == Some(Error::AccessDenied), "a timer needs the send right");
+
+    // Device calls need the right kind of handle.
+    c.check(e.map(0x50_0000_0000) == Err(Error::BadHandle), "mapped an endpoint");
+    c.check(e.acknowledge_interrupt() == Err(Error::BadHandle), "acknowledged an endpoint as an interrupt");
+    c.check(e.bind_interrupt(&e, 1) == Err(Error::BadHandle), "bound an endpoint as an interrupt");
     c.ok
 }
 

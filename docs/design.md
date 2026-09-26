@@ -13,11 +13,12 @@ GIC interrupts and a timer tick, MMU and caches, kernel heap, physical page
 allocator, higher-half kernel with W^X mappings, per-process address spaces,
 user mode with an ELF loader and the first system calls, threads with
 preemptive round-robin scheduling, a boot image from which the kernel
-starts `init`, and `init` the rest, and synchronous IPC with handles,
-rights, badges and one-shot reply handles.
+starts `init`, and `init` the rest, synchronous IPC with handles, rights,
+badges and one-shot reply handles, and handles for device memory,
+interrupts and timers, with which a user-space console server drives the
+serial ports and the screen.
 
-Next: handles for memory and interrupts, so drivers can run in user space;
-then the console server, the process manager and the shell.
+Next: the process manager and the shell.
 
 ## Memory layout
 
@@ -90,6 +91,14 @@ As built (`src/ipc.rs`):
 - **Moving handles** needs the `TRANSFER` right. A handle in a message that
   isn't delivered is closed.
 
+- **Notifications.** Interrupts and timers can't wait for a receiver, so
+  they *notify* an endpoint instead: their badges are ORed into a pending
+  word, which the next receive collects as one message (label `NOTIFY`),
+  ahead of any waiting sender, as seL4's notifications do. A server waits
+  for clients and hardware in the same `receive`, and tells them apart by
+  badge. An interrupt is masked when it arrives until its owner
+  acknowledges it, so a level-triggered device can't flood the system.
+
 Known gaps, for later: no timeouts or non-blocking variants; a thread
 waiting on IPC can't be interrupted (there is no way to stop a process
 yet); and an endpoint can be kept alive by a cycle, such as a message
@@ -113,8 +122,9 @@ hold up to 1024. The rights so far (`pios_abi::rights`):
 | `SEND` | send and call | endpoint handles |
 | `RECEIVE` | receive | endpoint handles |
 | `DUPLICATE` | making copies (with the same or fewer rights) | endpoint handles |
-| `TRANSFER` | passing the handle on, in a message or to `spawn` | endpoint, process and reply handles |
+| `TRANSFER` | passing the handle on, in a message or to `spawn` | every kind |
 | `WAIT` | waiting for the process to end | process handles |
+| `MAP` | mapping the memory | memory handles |
 
 `endpoint()` returns a handle with the first four. `spawn` can give the new
 process one handle, which is how a parent sets up the first channel to a
@@ -146,14 +156,23 @@ for objects comes from the kernel heap, with per-process limits. There are
 no global names: finding a service is a user-space job.
 
 **Start-up.** The kernel starts one user program, `init`, holding handles to
-all free memory, every device and every interrupt. `init` starts each
-server with only what it needs (for example the console server gets the
-UART's registers, its interrupt and a fresh endpoint), and the shell gets
-handles to the console and process manager endpoints and nothing else.
+the hardware it can hand over, described by a `BootInfo` page. `init`
+starts each server with only what it needs, and the shell will get handles
+to the console and process manager endpoints and nothing else.
 
-Until the console server exists, the kernel keeps a temporary **debug print**
-system call so early user programs can show they are alive. It will be
-removed once the console server works.
+So far that hardware is the console: each UART's registers and interrupt,
+the framebuffer, and the text the kernel left on the screen, which `init`
+passes to the console server in set-up messages (through a handle with a
+set-up badge, so clients can't send them). Later `init` should get handles
+to all free memory and every device and interrupt, as planned.
+
+The kernel keeps its temporary **debug print** system call for programs
+without a console handle (the kernel's own test programs, and anything
+that fails before connecting). It can go once those have a console too.
+
+Kernel objects so far: endpoints, reply handles, processes, memory (device
+registers, a framebuffer, or read-only kernel data), interrupts and
+timers.
 
 ## System calls
 
@@ -176,6 +195,10 @@ and `libpios` both use.
 | 9 | `call(endpoint, message)`: the reply replaces the message |
 | 10 | `receive(endpoint, message)` |
 | 11 | `reply(reply, message)` |
+| 12 | `map(memory, address)` |
+| 13 | `interrupt_bind(interrupt, endpoint, badge)` |
+| 14 | `interrupt_ack(interrupt)` |
+| 15 | `timer(endpoint, badge, period_ms) -> handle` |
 
 The details of each are in the `pios-abi` crate.
 
@@ -263,7 +286,7 @@ for now).
    initramfs; see [Decisions](#decisions))~~
 6. ~~IPC and capabilities~~ (endpoints, replies and process handles so
    far; memory and interrupt handles come with step 7)
-7. User-space console server (device memory and interrupt handles)
+7. ~~User-space console server (device memory and interrupt handles)~~
 8. Process manager and the shell
 
 ## Decisions

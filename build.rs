@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The user programs in the boot image; see src/bootimage.rs.
-const PROGRAMS: &[&str] = &["init", "hello", "usertest", "crashtest", "fptest", "ipctest"];
+const PROGRAMS: &[&str] = &[
+    "init", "console", "echo", "hello", "usertest", "crashtest", "fptest", "ipctest",
+];
 
 fn main() {
     let dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -68,6 +70,8 @@ fn build_user_programs(dir: &Path) {
         "user/libpios",
         "abi",
         "bootfs",
+        "pl011",
+        "textconsole",
     ] {
         println!("cargo:rerun-if-changed={path}");
     }
