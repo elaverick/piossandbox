@@ -1,0 +1,24 @@
+[package]
+name = "pios"
+version = "0.1.0"
+edition = "2024"
+description = "A small command-line OS for the Raspberry Pi 4, written in Rust"
+publish = false
+
+[[bin]]
+name = "pios"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+codegen-units = 1
+debug = true

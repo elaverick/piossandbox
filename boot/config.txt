@@ -1,0 +1,14 @@
+# Raspberry Pi 4 firmware configuration for pios.
+# See https://www.raspberrypi.com/documentation/computers/config_txt.html
+
+# Start the ARM cores in 64-bit mode and load our kernel at 0x80000.
+arm_64bit=1
+kernel=kernel8.img
+
+# Keep the UART clocks stable. pios reconfigures GPIO 14/15 for UART0 (PL011)
+# itself, so no device tree overlay is needed.
+enable_uart=1
+
+# Uncomment to see the firmware's own boot log on GPIO 14/15 (via the mini
+# UART) before pios takes over. Useful if nothing appears on the serial port.
+#uart_2ndstage=1
